@@ -86,12 +86,12 @@ Inner speech EEG signals are weak and highly overlapping. Improvements in perfor
   matplotlib
 ## How to Run
 
-Clone repository
-Load dataset (Inner Speech Dataset)
-Run notebooks in order:
-01_data_exploration.ipynb
-02_preprocessing_and_features.ipynb
-03_classification_and_evaluation.ipynb
-Inner speech classification is a challenging EEG task with inherently overlapping signals
+1. Clone repository
+2. Load dataset (Inner Speech Dataset)
+3. Run notebooks in order:
+-> data_exploration.ipynb
+-> preprocessing_and_features.ipynb
+-> classification_and_evaluation.ipynb
+   
 ## Reference
 Nieto et al., Thinking out loud: an open-access EEG-based BCI dataset for inner speech recognition, Scientific Data (2022)
