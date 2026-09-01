@@ -1,534 +1,468 @@
 """
 EEG Imagined Speech Decoding -- Proof of Concept
-Streamlit application following the 9-stage methodology pipeline:
+Streamlit application following the first 2 stages of the methodology pipeline:
 
-1. Dataset collection        6. Cross-dataset transfer learning
-2. EEG preprocessing         7. Embedding space analysis
-3/4. Decoding models         8. Evaluation metrics
-5. Embedding extraction      9. Visualizations & interpretability
+1. Dataset collection (BIDS ZIP & Local Dataset Loader)
+2. EEG preprocessing (Literature-Based Filtering, Resampling, ICA, Epoching)
 
 Run with:  streamlit run app.py
 """
 
+import os
+import io
+import re
+import glob
+import shutil
+import tempfile
+import zipfile
+import urllib.request
+
+import mne
 import numpy as np
 import pandas as pd
-import torch
 import streamlit as st
 import matplotlib.pyplot as plt
-import mne
 
-from modules import synthetic_data, preprocessing, models, training, embedding_analysis, interpretability
+from Step2_preprocessing_ import LiteraturePreprocessingPipeline
 
-st.set_page_config(page_title="EEG Imagined Speech Decoding -- POC", layout="wide")
+st.set_page_config(
+    page_title="EEG Inner Speech Decoding -- POC", 
+    page_icon="🧠",
+    layout="wide"
+)
 
 # ----------------------------------------------------------------------
 # Session state initialization
 # ----------------------------------------------------------------------
-for key, default in [
-    ("raw_data", {}),       # language -> (X, y, subj, class_names) OR (raw, events, subj, class_names)
-    ("proc_data", {}),      # language -> (X, y, subj, class_names, log)
-    ("trained_models", {}), # (language_or_joint, model_name) -> (model, history, X_val, y_val)
-    ("eval_results", {}),   # same keys -> evaluate_model() output
-]:
-    if key not in st.session_state:
-        st.session_state[key] = default
+if "raw_data" not in st.session_state:
+    st.session_state.raw_data = {}  # lang -> (raw, events, subj_array, class_names, meta_dict)
 
-st.title("EEG Imagined Speech Decoding -- Proof of Concept")
+if "proc_data" not in st.session_state:
+    st.session_state.proc_data = {}  # lang -> (X, y, subj, class_names, log)
+
+if "uploaded_extracted_dir" not in st.session_state:
+    st.session_state.uploaded_extracted_dir = None
+
+if "detected_runs" not in st.session_state:
+    st.session_state.detected_runs = {}
+
+
+# ----------------------------------------------------------------------
+# Helper Functions: BIDS Parsing, Pointer Resolution & Event Sync
+# ----------------------------------------------------------------------
+def is_git_annex_pointer(file_path: str) -> bool:
+    """Check if a file is a DataLad / Git-Annex text pointer file instead of actual binary data."""
+    try:
+        if not os.path.exists(file_path):
+            return False
+        if os.path.getsize(file_path) < 1024:
+            with open(file_path, "rb") as f:
+                content = f.read(500)
+                if b"git/annex" in content or b"SHA256" in content or b"/annex/objects" in content:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def scan_bids_eeg_dataset(root_dir: str):
+    """
+    Scans a directory (extracted zip or folder) and maps EEG files to their
+    corresponding BIDS events and channel metadata.
+    """
+    runs = {}
+    all_files = []
+    for root, dirs, files in os.walk(root_dir):
+        for f in files:
+            all_files.append(os.path.join(root, f))
+
+    # Find EEG data files
+    eeg_files = [f for f in all_files if f.endswith((".bdf", ".set", ".fif", ".vhdr"))]
+    tsv_files = [f for f in all_files if f.endswith("events.tsv")]
+
+    for eeg_path in eeg_files:
+        base_name = os.path.basename(eeg_path)
+        dir_name = os.path.dirname(eeg_path)
+        
+        # Extract subject and session tokens (e.g. sub-01, ses-EEG)
+        subj_match = re.search(r"sub-[a-zA-Z0-9]+", base_name) or re.search(r"sub-[a-zA-Z0-9]+", eeg_path)
+        ses_match = re.search(r"ses-[a-zA-Z0-9]+", base_name) or re.search(r"ses-[a-zA-Z0-9]+", eeg_path)
+        task_match = re.search(r"task-[a-zA-Z0-9]+", base_name)
+
+        subj_id = subj_match.group(0) if subj_match else "sub-01"
+        ses_id = ses_match.group(0) if ses_match else ""
+        task_id = task_match.group(0) if task_match else ""
+
+        key = f"{subj_id}" + (f" ({ses_id})" if ses_id else "") + (f" [{task_id}]" if task_id else "")
+        if key in runs:
+            key = f"{key} - {base_name}"
+
+        # Match corresponding events.tsv file
+        matched_events = None
+        # Priority 1: Exact prefix match in same folder
+        prefix = base_name.split("_eeg")[0] if "_eeg" in base_name else os.path.splitext(base_name)[0]
+        for tf in tsv_files:
+            if os.path.dirname(tf) == dir_name and prefix in os.path.basename(tf):
+                matched_events = tf
+                break
+        
+        # Priority 2: Any events.tsv in the same subject/session directory
+        if not matched_events:
+            for tf in tsv_files:
+                if os.path.dirname(tf) == dir_name:
+                    matched_events = tf
+                    break
+
+        # Priority 3: Any events.tsv matching the subject ID
+        if not matched_events:
+            for tf in tsv_files:
+                if subj_id in os.path.basename(tf) and ("func" not in tf):
+                    matched_events = tf
+                    break
+
+        runs[key] = {
+            "subj": subj_id,
+            "session": ses_id,
+            "eeg_file": eeg_path,
+            "events_file": matched_events,
+            "is_pointer": is_git_annex_pointer(eeg_path),
+            "filename": base_name,
+            "file_size": os.path.getsize(eeg_path),
+        }
+
+    return runs
+
+
+def download_openneuro_bdf(dataset_id: str, subj: str, dest_path: str):
+    """Downloads real binary BDF EEG file from OpenNeuro S3 public bucket."""
+    # S3 key convention for ds004196
+    possible_keys = [
+        f"{dataset_id}/{subj}/ses-EEG/eeg/{subj}_ses-EEG_task-inner_eeg.bdf",
+        f"{dataset_id}/{subj}/ses-EEG/eeg/{subj}_ses-EEG_eeg.bdf",
+        f"{dataset_id}/{subj}/eeg/{subj}_eeg.bdf",
+    ]
+    
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    success = False
+    for key in possible_keys:
+        url = f"https://s3.amazonaws.com/openneuro.org/{key}"
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req) as resp, open(dest_path, "wb") as out_f:
+                total_length = resp.headers.get("content-length")
+                progress_bar = st.progress(0, text=f"Downloading real EEG data from OpenNeuro S3 ({subj})...")
+                downloaded = 0
+                total_bytes = int(total_length) if total_length else 150000000
+                while True:
+                    chunk = resp.read(1024 * 512)
+                    if not chunk:
+                        break
+                    downloaded += len(chunk)
+                    out_f.write(chunk)
+                    progress_bar.progress(min(1.0, downloaded / total_bytes), text=f"Downloading {subj} EEG: {downloaded/(1024*1024):.1f} MB / {total_bytes/(1024*1024):.1f} MB")
+                progress_bar.empty()
+            success = True
+            break
+        except Exception:
+            continue
+    return success
+
+
+def parse_and_load_eeg(run_info: dict):
+    """Loads raw EEG and builds synchronized events array."""
+    eeg_file = run_info["eeg_file"]
+    events_file = run_info["events_file"]
+    
+    # 1. Read MNE raw object
+    if eeg_file.endswith(".bdf"):
+        raw = mne.io.read_raw_bdf(eeg_file, preload=True, verbose=False)
+    elif eeg_file.endswith(".vhdr"):
+        raw = mne.io.read_raw_brainvision(eeg_file, preload=True, verbose=False)
+    elif eeg_file.endswith(".set"):
+        raw = mne.io.read_raw_eeglab(eeg_file, preload=True, verbose=False)
+    elif eeg_file.endswith(".fif"):
+        raw = mne.io.read_raw_fif(eeg_file, preload=True, verbose=False)
+    else:
+        raise ValueError(f"Unsupported EEG file format: {eeg_file}")
+
+    # Pick EEG channels only (filter out Status, Trigger, etc.)
+    try:
+        raw.pick_types(eeg=True, stim=False, misc=False)
+    except Exception:
+        pass
+
+    # 2. Parse events
+    events_df = None
+    if events_file and os.path.exists(events_file):
+        events_df = pd.read_csv(events_file, sep="\t")
+        
+        # Determine trial condition column
+        label_col = None
+        for col in ["trial_type", "value", "event_type", "stimulus", "condition"]:
+            if col in events_df.columns:
+                label_col = col
+                break
+        
+        labels_str = events_df[label_col].values if label_col else np.ones(len(events_df), dtype=str)
+        unique_labels = sorted(set(labels_str))
+        label_map = {lbl: i for i, lbl in enumerate(unique_labels)}
+        labels_int = np.array([label_map[l] for l in labels_str])
+        
+        # Detect onset unit (milliseconds vs seconds)
+        onset_vals = events_df["onset"].values.astype(float)
+        if onset_vals.max() > raw.times[-1]:
+            onset_seconds = onset_vals / 1000.0
+        else:
+            onset_seconds = onset_vals
+
+        events = np.column_stack([
+            (onset_seconds * raw.info["sfreq"]).astype(int),
+            np.zeros(len(events_df)),
+            labels_int
+        ]).astype(int)
+        
+        cn = [str(l) for l in unique_labels]
+    else:
+        # Fallback dummy events
+        events = np.array([[(i + 1) * int(raw.info["sfreq"] * 2), 0, 1] for i in range(10)], dtype=int)
+        cn = ["Dummy_Class"]
+        events_df = pd.DataFrame({"onset": [i * 2.0 for i in range(10)], "trial_type": ["Dummy_Class"] * 10})
+
+    subj_array = np.zeros(len(events), dtype=int)
+    meta = {
+        "filename": os.path.basename(eeg_file),
+        "events_df": events_df,
+        "duration": raw.times[-1],
+        "n_channels": len(raw.ch_names),
+        "sfreq": raw.info["sfreq"],
+        "subj_id": run_info.get("subj", "sub-01")
+    }
+
+    return raw, events, subj_array, cn, meta
+
+
+# ----------------------------------------------------------------------
+# Application UI Layout
+# ----------------------------------------------------------------------
+st.title("🧠 EEG Imagined Speech Decoding -- Proof of Concept")
 st.caption(
-    "Demonstrates the full pipeline (preprocessing -> EEGNet/Conformer -> "
-    "embeddings -> cross-lingual transfer -> evaluation -> interpretability) "
-    "using synthetically generated EEG-like signals in place of the real "
-    "Spanish and English recordings. Swap in real data via ZIP upload."
-)
-st.warning(
-    "**This is a proof-of-concept, not a scientific result.** All signals "
-    "below are synthetically generated to have a learnable class-dependent "
-    "structure, so the pipeline has something real to find. Accuracy numbers "
-    "here say nothing about performance on real EEG.",
-    icon="⚠️",
+    "Demonstrates Stage 1 (Dataset Collection & BIDS Parsing) and Stage 2 (Literature-Based EEG Preprocessing) "
+    "preserving Gamma-band activations for inner speech decoding."
 )
 
 STAGES = [
     "1. Dataset collection",
     "2. EEG preprocessing",
-    "3 & 4. Decoding models",
-    "5. Embedding extraction",
-    "6. Cross-dataset transfer learning",
-    "7. Embedding space analysis",
-    "8. Evaluation metrics",
-    "9. Visualizations & interpretability",
 ]
 stage = st.sidebar.radio("Pipeline stage", STAGES)
-device = "cpu"
 
 # ========================================================================
 # STAGE 1 -- Dataset collection
 # ========================================================================
 if stage == "1. Dataset collection":
-    st.header("Stage 1 -- Dataset Collection")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Spanish dataset (Synthetic)")
-        st.write(f"Subjects: {synthetic_data.DATASET_CONFIG['spanish']['n_subjects']}")
-        st.write(f"Words: {', '.join(synthetic_data.DATASET_CONFIG['spanish']['words'])}")
-        n_trials_es = st.slider("Trials per class (Spanish)", 10, 60, 30, key="n_es")
-        if st.button("Generate Spanish dataset"):
-            X, y, subj, cn = synthetic_data.generate_dataset("spanish", n_trials_per_class=n_trials_es, seed=1)
-            st.session_state.raw_data["spanish"] = (X, y, subj, cn)
-            st.success(f"Generated {X.shape[0]} trials, shape {X.shape}")
-
-    with col2:
-        st.subheader("English dataset (Synthetic)")
-        st.write(f"Subjects: {synthetic_data.DATASET_CONFIG['english']['n_subjects']}")
-        st.write(f"Words: {', '.join(synthetic_data.DATASET_CONFIG['english']['words'])}")
-        n_trials_en = st.slider("Trials per class (English)", 10, 60, 30, key="n_en")
-        if st.button("Generate English dataset"):
-            X, y, subj, cn = synthetic_data.generate_dataset("english", n_trials_per_class=n_trials_en, seed=2)
-            st.session_state.raw_data["english"] = (X, y, subj, cn)
-            st.success(f"Generated {X.shape[0]} trials, shape {X.shape}")
-
-    st.divider()
-    st.subheader("Or upload your own real dataset (BIDS ZIP format)")
-    st.caption("Upload a `.zip` file containing a standard BIDS structured EEG dataset. The POC will automatically extract it, find the EEG file and the events file.")
-    up_lang = st.selectbox("Assign upload to language slot", ["spanish", "english"])
-    up_zip = st.file_uploader("Upload Dataset ZIP", type=["zip"], key="upzip")
+    st.header("Stage 1 -- Dataset Collection & BIDS Structure Loading")
     
-    if up_zip is not None and st.button("Extract and Load Dataset"):
-        import zipfile
-        import tempfile
-        import os
+    tab_upload, tab_local = st.tabs(["📤 Upload Dataset ZIP", "📂 Load Pre-downloaded Real Dataset"])
+    
+    # ------------------------------------------------------------------
+    # TAB 1: Upload Dataset ZIP
+    # ------------------------------------------------------------------
+    with tab_upload:
+        st.subheader("Upload Real Dataset (BIDS ZIP format)")
+        st.caption("Upload a `.zip` file containing a standard BIDS EEG dataset (e.g. `ds004196_sub01_eeg.zip` or `ds004196_all_eeg.zip`).")
         
-        with st.spinner("Extracting and loading..."):
-            temp_dir = tempfile.mkdtemp()
-            with zipfile.ZipFile(up_zip, 'r') as zip_ref:
-                zip_ref.extractall(temp_dir)
-            
-            # Find the first .vhdr, .bdf, .set, or .fif
-            raw_file = None
-            for root, dirs, files in os.walk(temp_dir):
-                for file in files:
-                    if file.endswith(('.vhdr', '.bdf', '.set', '.fif')):
-                        raw_file = os.path.join(root, file)
-                        break
-                if raw_file:
-                    break
-            
-            if not raw_file:
-                st.error("Could not find any EEG files (.vhdr, .bdf, .set, .fif) in the uploaded zip.")
-            else:
-                st.write(f"Found EEG file: {os.path.basename(raw_file)}")
-                try:
-                    if raw_file.endswith('.vhdr'):
-                        raw = mne.io.read_raw_brainvision(raw_file, preload=True)
-                    elif raw_file.endswith('.bdf'):
-                        raw = mne.io.read_raw_bdf(raw_file, preload=True)
-                    elif raw_file.endswith('.set'):
-                        raw = mne.io.read_raw_eeglab(raw_file, preload=True)
-                    elif raw_file.endswith('.fif'):
-                        raw = mne.io.read_raw_fif(raw_file, preload=True)
-                        
-                    # Find events.tsv if possible, else dummy
-                    events_file = None
-                    for root, dirs, files in os.walk(temp_dir):
-                        for file in files:
-                            if file.endswith('events.tsv'):
-                                events_file = os.path.join(root, file)
-                                break
-                        if events_file:
-                            break
-                            
-                    if events_file:
-                        st.write(f"Found events file: {os.path.basename(events_file)}")
-                        events_df = pd.read_csv(events_file, sep='\t')
-                        
-                        # Fallback for trial_type if not available
-                        if 'trial_type' in events_df.columns:
-                            labels_str = events_df['trial_type'].values
-                        elif 'value' in events_df.columns:
-                            labels_str = events_df['value'].values
-                        else:
-                            labels_str = np.ones(len(events_df))
-
-                        unique_labels = sorted(set(labels_str))
-                        label_map = {lbl: i for i, lbl in enumerate(unique_labels)}
-                        labels_int = np.array([label_map[l] for l in labels_str])
-                        
-                        events = np.column_stack([
-                            (events_df['onset'].values * raw.info['sfreq']).astype(int),
-                            np.zeros(len(events_df)),
-                            labels_int
-                        ]).astype(int)
-                        
-                        cn = [str(l) for l in unique_labels]
-                    else:
-                        st.warning("No events.tsv found. Creating dummy events (10 trials).")
-                        # create 10 evenly spaced dummy events
-                        events = np.array([[(i+1)*int(raw.info['sfreq']*2), 0, 1] for i in range(10)], dtype=int)
-                        cn = ["Dummy_Class"]
-
-                    st.session_state.raw_data[up_lang] = (raw, events, np.zeros(len(events), dtype=int), cn)
-                    st.success(f"Successfully loaded MNE raw object! Length: {raw.times[-1]:.2f}s, Channels: {len(raw.ch_names)}")
+        up_lang = st.selectbox("Assign upload to language slot", ["english", "spanish", "chinese"], key="upload_lang_slot")
+        up_zip = st.file_uploader("Upload Dataset ZIP", type=["zip"], key="upzip")
+        
+        if up_zip is not None:
+            if st.button("Extract and Inspect Dataset Structure", key="btn_extract_zip"):
+                with st.spinner("Extracting and analyzing BIDS structure..."):
+                    temp_dir = tempfile.mkdtemp()
+                    with zipfile.ZipFile(up_zip, "r") as zip_ref:
+                        # Extract EEG, TSV, JSON metadata files only
+                        for member in zip_ref.namelist():
+                            if member.endswith((".bdf", ".set", ".fif", ".vhdr", ".vmrk", ".eeg", ".tsv", ".json", ".txt", "README")):
+                                zip_ref.extract(member, temp_dir)
                     
-                except Exception as e:
-                    st.error(f"Error loading EEG file: {e}")
+                    st.session_state.uploaded_extracted_dir = temp_dir
+                    runs = scan_bids_eeg_dataset(temp_dir)
+                    st.session_state.detected_runs = runs
+                    
+            if st.session_state.detected_runs:
+                st.success(f"Detected {len(st.session_state.detected_runs)} EEG recording(s) in uploaded dataset!")
+                
+                selected_run_key = st.selectbox(
+                    "Select Subject / Recording to Load", 
+                    list(st.session_state.detected_runs.keys()),
+                    key="sel_run_upload"
+                )
+                run_info = st.session_state.detected_runs[selected_run_key]
+                
+                # Check for Git-annex pointer
+                if run_info["is_pointer"]:
+                    st.warning(
+                        f"⚠️ **Git-Annex Pointer Detected:** `{run_info['filename']}` is a DataLad pointer text file (OpenNeuro GitHub archive). "
+                        "Click below to automatically retrieve the actual binary EEG recording from OpenNeuro AWS S3."
+                    )
+                    if st.button("🚀 Auto-Download Real EEG Data from OpenNeuro S3", key="btn_resolve_s3"):
+                        with st.spinner("Downloading real binary EEG recording..."):
+                            success = download_openneuro_bdf("ds004196", run_info["subj"], run_info["eeg_file"])
+                            if success:
+                                st.success("Downloaded real binary EEG file! Re-inspecting...")
+                                run_info["is_pointer"] = False
+                                run_info["file_size"] = os.path.getsize(run_info["eeg_file"])
+                            else:
+                                st.error("Failed to download from OpenNeuro S3.")
+                
+                if not run_info["is_pointer"]:
+                    if st.button("Load Recording into Pipeline", key="btn_load_run"):
+                        with st.spinner(f"Loading {run_info['filename']} and synchronizing events..."):
+                            try:
+                                raw, events, subj, cn, meta = parse_and_load_eeg(run_info)
+                                st.session_state.raw_data[up_lang] = (raw, events, subj, cn, meta)
+                                st.success(f"Successfully loaded {up_lang.title()} dataset! Length: {raw.times[-1]:.2f}s | Channels: {len(raw.ch_names)} | Trials: {len(events)}")
+                            except Exception as e:
+                                st.error(f"Error loading EEG recording: {e}")
 
+    # ------------------------------------------------------------------
+    # TAB 2: Load Pre-downloaded Local Dataset
+    # ------------------------------------------------------------------
+    with tab_local:
+        st.subheader("Direct Load from Local Storage")
+        st.caption("Load prepared OpenNeuro datasets directly from the `data/` directory.")
+        
+        local_data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
+        available_datasets = []
+        if os.path.exists(local_data_dir):
+            for d in os.listdir(local_data_dir):
+                full_d = os.path.join(local_data_dir, d)
+                if os.path.isdir(full_d) or d.endswith(".zip"):
+                    available_datasets.append(d)
+
+        selected_local_ds = st.selectbox("Select local dataset folder or zip", available_datasets, key="sel_local_ds")
+        local_lang = st.selectbox("Assign to language slot", ["english", "spanish", "chinese"], key="local_lang_slot")
+        
+        if st.button("Scan and Load Local Dataset", key="btn_scan_local"):
+            with st.spinner("Scanning local dataset..."):
+                target_path = os.path.join(local_data_dir, selected_local_ds)
+                if selected_local_ds.endswith(".zip"):
+                    temp_dir = tempfile.mkdtemp()
+                    with zipfile.ZipFile(target_path, "r") as zf:
+                        zf.extractall(temp_dir)
+                    scan_dir = temp_dir
+                else:
+                    scan_dir = target_path
+                
+                runs = scan_bids_eeg_dataset(scan_dir)
+                if runs:
+                    st.session_state.detected_runs = runs
+                    first_key = list(runs.keys())[0]
+                    raw, events, subj, cn, meta = parse_and_load_eeg(runs[first_key])
+                    st.session_state.raw_data[local_lang] = (raw, events, subj, cn, meta)
+                    st.success(f"Successfully loaded {selected_local_ds} ({first_key}) into **{local_lang.title()}** slot!")
+                else:
+                    st.error("No valid EEG recordings found in the selected local dataset.")
+
+    # ------------------------------------------------------------------
+    # Summary of Currently Loaded Datasets
+    # ------------------------------------------------------------------
     st.divider()
-    for lang, data_tuple in st.session_state.raw_data.items():
-        if isinstance(data_tuple[0], mne.io.BaseRaw):
-            raw, events, subj, cn = data_tuple
-            st.write(f"**{lang}** (Real MNE Data): {len(events)} trials | {len(raw.ch_names)} channels | Fs: {raw.info['sfreq']} Hz | classes: {cn}")
-        else:
-            X, y, subj, cn = data_tuple
-            st.write(f"**{lang}** (Synthetic Data): {X.shape[0]} trials | {X.shape[1]} channels | {X.shape[2]} timepoints | classes: {cn}")
+    st.subheader("Loaded Datasets Overview")
+    if not st.session_state.raw_data:
+        st.info("No datasets loaded yet. Upload a dataset or load from local storage above.")
+    else:
+        for lang, data_tuple in st.session_state.raw_data.items():
+            raw, events, subj, cn = data_tuple[:4]
+            meta = data_tuple[4] if len(data_tuple) > 4 else {}
+            
+            with st.expander(f"🔹 **{lang.upper()}** Dataset: {meta.get('filename', 'Raw EEG')}", expanded=True):
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Sampling Rate", f"{raw.info['sfreq']} Hz")
+                col2.metric("EEG Channels", len(raw.ch_names))
+                col3.metric("Duration", f"{raw.times[-1]:.1f} s")
+                col4.metric("Total Trials", len(events))
+                
+                # Class trial distribution breakdown
+                events_df = meta.get("events_df")
+                if events_df is not None and "trial_type" in events_df.columns:
+                    st.write("**Inner Speech Classes & Trial Counts:**")
+                    counts_df = events_df["trial_type"].value_counts().reset_index()
+                    counts_df.columns = ["Class / Stimulus", "Trial Count"]
+                    st.dataframe(counts_df, use_container_width=True)
 
 # ========================================================================
 # STAGE 2 -- EEG preprocessing
 # ========================================================================
 elif stage == "2. EEG preprocessing":
-    st.header("Stage 2 -- EEG Preprocessing")
+    st.header("Stage 2 -- EEG Preprocessing Pipeline")
     if not st.session_state.raw_data:
-        st.info("Generate or upload a dataset in Stage 1 first.")
+        st.info("Please load or upload a dataset in Stage 1 first.")
     else:
-        lang = st.selectbox("Dataset", list(st.session_state.raw_data.keys()))
+        lang = st.selectbox("Select Active Dataset", list(st.session_state.raw_data.keys()), key="sel_prep_lang")
         data_tuple = st.session_state.raw_data[lang]
+        raw, events, subj, cn = data_tuple[:4]
+        meta = data_tuple[4] if len(data_tuple) > 4 else {}
 
-        if isinstance(data_tuple[0], mne.io.BaseRaw):
-            st.subheader("Literature-Based Preprocessing Pipeline (Real Data)")
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                low = st.number_input("Bandpass low (Hz)", 0.1, 10.0, 4.0)
-                high = st.number_input("Bandpass high (Hz)", 10.0, 150.0, 100.0)
-            with c2:
-                notch = st.number_input("Notch frequency (Hz)", 40.0, 70.0, 50.0)
-                target_sfreq = st.number_input("Target Resampling Freq (Hz)", 100, 1000, 250)
-            with c3:
-                tmin = st.number_input("Epoch start (s)", -2.0, 5.0, 1.5)
-                tmax = st.number_input("Epoch end (s)", -2.0, 5.0, 3.5)
+        st.subheader(f"Literature-Based Preprocessing ({lang.title()} Dataset)")
+        st.markdown(
+            "> **Standard Preprocessing Protocol:**\n"
+            "> - **Bandpass Filter:** 4.0 – 100.0 Hz (preserves Gamma-band 30–100 Hz).\n"
+            "> - **Notch Filter:** 50 Hz powerline attenuation.\n"
+            "> - **Resampling:** 250 Hz (Nyquist 125 Hz covers full 100 Hz Gamma band).\n"
+            "> - **ICA Artifact Removal:** Removes ocular and muscle artifacts.\n"
+            "> - **Epoching & Channel Z-Score Normalization:** Corrects non-stationarity across trials."
+        )
 
-            if st.button("Run Literature Pipeline"):
-                from modules.preprocessing_literature import LiteraturePreprocessingPipeline
-                pipeline = LiteraturePreprocessingPipeline(
-                    target_sfreq=target_sfreq, l_freq=low, h_freq=high, notch_freqs=[notch]
-                )
-                
-                with st.spinner("Preprocessing with MNE (Filtering, ICA, Epoching)..."):
-                    raw, events, subj, cn = data_tuple
-                    event_id = {str(c): c for c in set(events[:, 2])}
-                    
-                    try:
-                        raw_copy = raw.copy()
-                        Xp, final_events, epochs = pipeline.run_pipeline(raw_copy, events, event_id, tmin=tmin, tmax=tmax)
-                        y = final_events[:, 2]
-                        st.session_state.proc_data[lang] = (Xp, y, subj[:len(y)], cn, ["MNE preprocessing successful."])
-                        st.success("Preprocessing complete. (Gamma band preserved!)")
-                        
-                        st.subheader("PSD Before Preprocessing")
-                        fig = raw.compute_psd(fmax=120).plot(show=False)
-                        st.pyplot(fig)
-                        
-                        st.subheader("PSD After Preprocessing (Epochs)")
-                        fig2 = epochs.compute_psd(fmax=120).plot(show=False)
-                        st.pyplot(fig2)
-                        
-                    except Exception as e:
-                        st.error(f"Error during preprocessing: {e}")
-        else:
-            st.subheader("Legacy Synthethic Preprocessing")
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                low = st.number_input("Bandpass low (Hz)", 0.1, 10.0, 1.0)
-                high = st.number_input("Bandpass high (Hz)", 10.0, 60.0, 40.0)
-            with c2:
-                notch = st.number_input("Notch frequency (Hz)", 40.0, 70.0, 50.0)
-                z_thresh = st.number_input("Artifact clip |z| threshold", 2.0, 10.0, 6.0)
-            with c3:
-                baseline_samples = st.number_input("Baseline samples", 1, 50, 10)
-                do_norm = st.checkbox("Z-score normalize", value=True)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            low = st.number_input("Bandpass low (Hz)", 0.1, 10.0, 4.0, step=0.5)
+            high = st.number_input("Bandpass high (Hz)", 10.0, 150.0, 100.0, step=5.0)
+        with c2:
+            notch = st.number_input("Notch frequency (Hz)", 40.0, 70.0, 50.0, step=1.0)
+            target_sfreq = st.number_input("Target Resampling Freq (Hz)", 100, 1000, 250, step=50)
+        with c3:
+            tmin = st.number_input("Epoch start (s relative to onset)", -2.0, 5.0, 0.5, step=0.1)
+            tmax = st.number_input("Epoch end (s relative to onset)", -2.0, 10.0, 3.5, step=0.1)
+            ica_comp = st.slider("ICA Components", min_value=5, max_value=min(30, len(raw.ch_names) - 1), value=15)
 
-            if st.button("Run preprocessing"):
-                X, y, subj, cn = data_tuple
-                Xp, log = preprocessing.run_pipeline(
-                    X, fs=synthetic_data.FS, low=low, high=high, notch=notch,
-                    z_thresh=z_thresh, baseline_samples=int(baseline_samples), do_normalize=do_norm,
-                )
-                st.session_state.proc_data[lang] = (Xp, y, subj, cn, log)
-                st.success("Preprocessing complete.")
-                for l in log:
-                    st.write("-", l)
-
-            if lang in st.session_state.proc_data:
-                X, y, subj, cn = data_tuple
-                Xp, _, _, _, log = st.session_state.proc_data[lang]
-                st.divider()
-                st.subheader("Raw vs. preprocessed (trial 0, channel 0)")
-                fig, ax = plt.subplots(figsize=(8, 3))
-                t = np.arange(X.shape[-1]) / synthetic_data.FS
-                ax.plot(t, X[0, 0], label="raw", alpha=0.6)
-                ax.plot(t, Xp[0, 0], label="preprocessed", alpha=0.9)
-                ax.set_xlabel("Time (s)")
-                ax.legend()
-                st.pyplot(fig)
-
-# ========================================================================
-# STAGE 3 & 4 -- Decoding models
-# ========================================================================
-elif stage == "3 & 4. Decoding models":
-    st.header("Stage 3 & 4 -- Baseline (EEGNet) and Representation (Conformer) Models")
-    if not st.session_state.proc_data:
-        st.info("Run preprocessing in Stage 2 first.")
-    else:
-        lang = st.selectbox("Dataset", list(st.session_state.proc_data.keys()))
-        Xp, y, subj, cn, _ = st.session_state.proc_data[lang]
-
-        model_name = st.radio("Model", ["eegnet", "conformer"], horizontal=True)
-        epochs = st.slider("Training epochs", 5, 60, 25)
-        test_size = st.slider("Validation split fraction", 0.1, 0.4, 0.25)
-
-        if st.button("Train model"):
-            X_train, X_val, y_train, y_val = training.split_data(Xp, y, test_size=test_size, seed=0)
-            n_channels, n_timepoints = Xp.shape[1], Xp.shape[2]
-            n_classes = len(cn)
-            model = models.build_model(model_name, n_channels, n_timepoints, n_classes)
-
-            progress_bar = st.progress(0)
-            status = st.empty()
-
-            def cb(epoch, total, tl, vl, va):
-                progress_bar.progress(epoch / total)
-                status.write(f"Epoch {epoch}/{total} -- train loss {tl:.3f} | val loss {vl:.3f} | val acc {va:.3f}")
-
-            model, hist = training.train_model(
-                model, X_train, y_train, X_val, y_val, epochs=epochs, progress_callback=cb
+        if st.button("🚀 Run Literature Pipeline", key="btn_run_pipeline"):
+            pipeline = LiteraturePreprocessingPipeline(
+                target_sfreq=target_sfreq, 
+                l_freq=low, 
+                h_freq=high, 
+                notch_freqs=[notch],
+                ica_components=ica_comp
             )
-            key = (lang, model_name)
-            st.session_state.trained_models[key] = (model, hist, X_val, y_val, cn)
-            st.success(f"Training complete. Final validation accuracy: {hist['val_acc'][-1]:.3f}")
+            
+            with st.spinner("Executing pipeline: Bandpass -> Notch -> Resampling -> ICA -> Epoching -> Z-Score Normalization..."):
+                event_id = {str(c): c for c in set(events[:, 2])}
+                
+                try:
+                    raw_copy = raw.copy()
+                    Xp, final_events, epochs = pipeline.run_pipeline(
+                        raw_copy, events, event_id, tmin=tmin, tmax=tmax
+                    )
+                    y = final_events[:, 2]
+                    st.session_state.proc_data[lang] = (Xp, y, subj[:len(y)], cn, ["MNE preprocessing successful."])
+                    
+                    st.success(
+                        f"✅ Preprocessing Complete! Extracted **{Xp.shape[0]} trials** × **{Xp.shape[1]} channels** × **{Xp.shape[2]} timepoints** "
+                        f"(Tensor shape: `{list(Xp.shape)}`). Gamma band (30-100Hz) successfully preserved!"
+                    )
+                    
+                    st.divider()
+                    col_p1, col_p2 = st.columns(2)
+                    with col_p1:
+                        st.subheader("Power Spectral Density (Before)")
+                        fig_before = raw.compute_psd(fmax=120).plot(show=False)
+                        st.pyplot(fig_before)
+                        
+                    with col_p2:
+                        st.subheader("Power Spectral Density (After Epoching)")
+                        fig_after = epochs.compute_psd(fmax=120).plot(show=False)
+                        st.pyplot(fig_after)
 
-            fig, ax = plt.subplots(figsize=(7, 3))
-            ax.plot(hist["train_loss"], label="train loss")
-            ax.plot(hist["val_loss"], label="val loss")
-            ax.set_xlabel("Epoch")
-            ax.legend()
-            st.pyplot(fig)
-
-        st.divider()
-        st.write("**Trained models this session:**")
-        for (l, m) in st.session_state.trained_models:
-            _, hist, *_ = st.session_state.trained_models[(l, m)]
-            st.write(f"- {l} / {m}: final val acc = {hist['val_acc'][-1]:.3f}")
-
-# ========================================================================
-# STAGE 5 -- Embedding extraction
-# ========================================================================
-elif stage == "5. Embedding extraction":
-    st.header("Stage 5 -- Embedding Extraction")
-    if not st.session_state.trained_models:
-        st.info("Train a model in Stage 3/4 first.")
-    else:
-        keys = list(st.session_state.trained_models.keys())
-        sel = st.selectbox("Trained model", keys, format_func=lambda k: f"{k[0]} / {k[1]}")
-        model, hist, X_val, y_val, cn = st.session_state.trained_models[sel]
-
-        if st.button("Extract embeddings"):
-            emb = embedding_analysis.extract_embeddings(model, X_val)
-            st.session_state[f"emb_{sel}"] = emb
-            st.success(f"Extracted embeddings: shape {emb.shape}")
-            st.dataframe(pd.DataFrame(emb[:10, :8]).round(3),
-                         use_container_width=True)
-            st.caption("Showing first 10 trials, first 8 embedding dimensions.")
-
-# ========================================================================
-# STAGE 6 -- Cross-dataset transfer learning
-# ========================================================================
-elif stage == "6. Cross-dataset transfer learning":
-    st.header("Stage 6 -- Cross-Dataset / Cross-Lingual Transfer Learning")
-    st.caption(
-        "Experiment A trains one model per language from scratch (no shared weights). "
-        "Experiment B pretrains jointly on the pooled Spanish + English data, then "
-        "fine-tunes per language."
-    )
-    if "spanish" not in st.session_state.proc_data or "english" not in st.session_state.proc_data:
-        st.info("Preprocess both the Spanish and English datasets in Stage 2 first.")
-    else:
-        model_name = st.radio("Model architecture", ["eegnet", "conformer"], horizontal=True, key="transfer_model")
-        epochs_a = st.slider("Epochs (Experiment A, per language)", 5, 60, 25, key="ep_a")
-        epochs_pretrain = st.slider("Epochs (Experiment B, joint pretrain)", 5, 60, 25, key="ep_pre")
-        epochs_ft = st.slider("Epochs (Experiment B, fine-tune)", 3, 30, 10, key="ep_ft")
-
-        if st.button("Run Experiment A: train from scratch per language"):
-            results_a = {}
-            for lang in ["spanish", "english"]:
-                Xp, y, subj, cn, _ = st.session_state.proc_data[lang]
-                X_train, X_val, y_train, y_val = training.split_data(Xp, y, test_size=0.25, seed=0)
-                n_channels, n_timepoints = Xp.shape[1], Xp.shape[2]
-                model = models.build_model(model_name, n_channels, n_timepoints, len(cn))
-                model, hist = training.train_model(model, X_train, y_train, X_val, y_val, epochs=epochs_a)
-                res = training.evaluate_model(model, X_val, y_val)
-                results_a[lang] = res["accuracy"]
-            st.session_state["exp_a_results"] = results_a
-            st.success("Experiment A complete.")
-
-        if st.button("Run Experiment B: joint pretraining + per-language fine-tune"):
-            data_es = st.session_state.proc_data["spanish"]
-            data_en = st.session_state.proc_data["english"]
-            n_channels = data_es[0].shape[1]
-            n_timepoints = data_es[0].shape[2]
-
-            X_pool = np.concatenate([data_es[0], data_en[0]], axis=0)
-            y_pool = np.concatenate([np.zeros(len(data_es[1])), np.ones(len(data_en[1]))]).astype(np.int64)
-            Xp_train, Xp_val, yp_train, yp_val = training.split_data(X_pool, y_pool, test_size=0.2, seed=0)
-
-            backbone = models.build_model(model_name, n_channels, n_timepoints, 2)
-            backbone, _ = training.train_model(backbone, Xp_train, yp_train, Xp_val, yp_val, epochs=epochs_pretrain)
-            st.write("Joint pretraining (language-id proxy task) complete.")
-
-            results_b = {}
-            for lang, data in [("spanish", data_es), ("english", data_en)]:
-                Xp, y, subj, cn, _ = data
-                X_train, X_val, y_train, y_val = training.split_data(Xp, y, test_size=0.25, seed=0)
-
-                ft_model = models.build_model(model_name, n_channels, n_timepoints, len(cn))
-                own_state = ft_model.state_dict()
-                pretrained_state = backbone.state_dict()
-                transfer_state = {
-                    k: v for k, v in pretrained_state.items()
-                    if k in own_state and "classifier" not in k and own_state[k].shape == v.shape
-                }
-                own_state.update(transfer_state)
-                ft_model.load_state_dict(own_state)
-
-                ft_model, hist = training.train_model(ft_model, X_train, y_train, X_val, y_val, epochs=epochs_ft)
-                res = training.evaluate_model(ft_model, X_val, y_val)
-                results_b[lang] = res["accuracy"]
-            st.session_state["exp_b_results"] = results_b
-            st.success("Experiment B complete.")
-
-        st.divider()
-        if "exp_a_results" in st.session_state or "exp_b_results" in st.session_state:
-            rows = []
-            for lang in ["spanish", "english"]:
-                rows.append({
-                    "Language": lang,
-                    "Experiment A (per-language, from scratch)": st.session_state.get("exp_a_results", {}).get(lang, None),
-                    "Experiment B (joint pretrain + fine-tune)": st.session_state.get("exp_b_results", {}).get(lang, None),
-                })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
-
-# ========================================================================
-# STAGE 7 -- Embedding space analysis
-# ========================================================================
-elif stage == "7. Embedding space analysis":
-    st.header("Stage 7 -- Embedding Space Analysis")
-    emb_keys = [k for k in st.session_state.keys() if k.startswith("emb_")]
-    if not emb_keys:
-        st.info("Extract embeddings in Stage 5 first.")
-    else:
-        sel_key = st.selectbox("Embedding set", emb_keys)
-        model_key = eval(sel_key.replace("emb_", ""))
-        emb = st.session_state[sel_key]
-        _, _, X_val, y_val, cn = st.session_state.trained_models[model_key]
-
-        method = st.radio("Reduction method", ["PCA", "t-SNE", "UMAP"], horizontal=True)
-        if st.button("Compute projection"):
-            if method == "PCA":
-                proj = embedding_analysis.reduce_pca(emb)
-            elif method == "t-SNE":
-                proj = embedding_analysis.reduce_tsne(emb)
-            else:
-                proj = embedding_analysis.reduce_umap(emb)
-
-            fig, ax = plt.subplots(figsize=(6, 5))
-            for cls_idx, cls_name in enumerate(cn):
-                mask = y_val == cls_idx
-                ax.scatter(proj[mask, 0], proj[mask, 1], label=cls_name, alpha=0.7, s=25)
-            ax.legend(fontsize=8)
-            ax.set_title(f"{method} projection of learned embeddings")
-            st.pyplot(fig)
-
-            qm = embedding_analysis.embedding_quality_metrics(emb, y_val)
-            st.subheader("Embedding quality metrics")
-            st.json(qm)
-
-# ========================================================================
-# STAGE 8 -- Evaluation metrics
-# ========================================================================
-elif stage == "8. Evaluation metrics":
-    st.header("Stage 8 -- Evaluation Metrics")
-    if not st.session_state.trained_models:
-        st.info("Train a model in Stage 3/4 first.")
-    else:
-        keys = list(st.session_state.trained_models.keys())
-        sel = st.selectbox("Trained model", keys, format_func=lambda k: f"{k[0]} / {k[1]}")
-        model, hist, X_val, y_val, cn = st.session_state.trained_models[sel]
-
-        res = training.evaluate_model(model, X_val, y_val)
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Accuracy", f"{res['accuracy']:.3f}")
-        c2.metric("Precision (macro)", f"{res['precision']:.3f}")
-        c3.metric("Recall (macro)", f"{res['recall']:.3f}")
-        c4.metric("F1 (macro)", f"{res['f1']:.3f}")
-
-        st.subheader("Confusion matrix")
-        fig, ax = plt.subplots(figsize=(5, 4))
-        im = ax.imshow(res["confusion_matrix"], cmap="Blues")
-        ax.set_xticks(range(len(cn))); ax.set_xticklabels(cn, rotation=45, ha="right", fontsize=7)
-        ax.set_yticks(range(len(cn))); ax.set_yticklabels(cn, fontsize=7)
-        ax.set_xlabel("Predicted"); ax.set_ylabel("True")
-        for i in range(len(cn)):
-            for j in range(len(cn)):
-                ax.text(j, i, str(res["confusion_matrix"][i, j]), ha="center", va="center", fontsize=7)
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        st.pyplot(fig)
-
-# ========================================================================
-# STAGE 9 -- Visualizations & interpretability
-# ========================================================================
-elif stage == "9. Visualizations & interpretability":
-    st.header("Stage 9 -- Visualizations & Interpretability")
-    if not st.session_state.trained_models:
-        st.info("Train a model in Stage 3/4 first.")
-    else:
-        keys = list(st.session_state.trained_models.keys())
-        sel = st.selectbox("Trained model", keys, format_func=lambda k: f"{k[0]} / {k[1]}")
-        model, hist, X_val, y_val, cn = st.session_state.trained_models[sel]
-        lang = sel[0]
-        
-        # Determine channel names
-        if lang in st.session_state.raw_data and isinstance(st.session_state.raw_data[lang][0], mne.io.BaseRaw):
-            ch_names = st.session_state.raw_data[lang][0].ch_names
-            fs = st.session_state.raw_data[lang][0].info['sfreq']
-        else:
-            ch_names = synthetic_data.channel_names(X_val.shape[1])
-            fs = synthetic_data.FS
-
-        tabs = st.tabs(["Scalp topography", "ERP waveform", "Attention / Grad-CAM"])
-
-        with tabs[0]:
-            trial_idx = st.slider("Trial index", 0, X_val.shape[0] - 1, 0, key="topo_trial")
-            time_idx = st.slider("Timepoint", 0, X_val.shape[2] - 1, X_val.shape[2] // 2, key="topo_time")
-            values = X_val[trial_idx, :, time_idx]
-            fig = interpretability.plot_scalp_topography(values, ch_names, title=f"Trial {trial_idx}, t-index {time_idx}")
-            st.pyplot(fig)
-
-        with tabs[1]:
-            channel_idx = st.slider("Channel", 0, X_val.shape[1] - 1, 0, key="erp_channel")
-            fig = interpretability.plot_erp(X_val, y_val, cn, ch_names, fs, channel_idx=channel_idx)
-            st.pyplot(fig)
-
-        with tabs[2]:
-            trial_idx2 = st.slider("Trial index", 0, X_val.shape[0] - 1, 0, key="interp_trial")
-            x_single = torch.tensor(X_val[trial_idx2:trial_idx2 + 1], dtype=torch.float32)
-            true_class = int(y_val[trial_idx2])
-
-            if sel[1] == "eegnet":
-                cam = interpretability.grad_cam_eegnet(model, x_single, target_class=true_class)
-                fig = interpretability.plot_grad_cam(
-                    X_val[trial_idx2], cam, ch_names, fs,
-                    title=f"Grad-CAM -- true class: {cn[true_class]}",
-                )
-                st.pyplot(fig)
-            else:
-                attn = model.attention_weights(x_single)[0].detach().numpy()
-                fig = interpretability.plot_attention_map(attn, title=f"Attention map -- true class: {cn[true_class]}")
-                st.pyplot(fig)
+                except Exception as e:
+                    import traceback
+                    st.error(f"Error during preprocessing: {e}")
+                    st.code(traceback.format_exc())
