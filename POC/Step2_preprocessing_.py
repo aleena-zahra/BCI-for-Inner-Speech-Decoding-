@@ -6,21 +6,30 @@ from sklearn.preprocessing import StandardScaler
 class LiteraturePreprocessingPipeline:
     """
     Literature-Based EEG Preprocessing Pipeline for Inner Speech Decoding.
-    Preserves the Gamma band (30-100Hz) and removes low-frequency drifts (<4Hz) 
-    and artifacts to prevent deep learning shortcut learning.
+    Follows the 9-step methodology from Nieto et al. (2022), Zhou et al. (2025), and Lopez-Bernal (2024):
+    
+    1. Scalp EEG Channel Picking & Segregation
+    2. Zero-phase FIR Bandpass (0.5 - 100.0 Hz) & 50Hz Notch Filtering (preserving Gamma 30-100Hz)
+    3. Temporal Decimation (Downsampling to 250 Hz)
+    4. Spatial Common Average Re-referencing (CAR)
+    5. Independent Component Analysis (ICA) Artifact Removal
+    6. Trial Epoching & Visual Cue P300 Window Rejection (IoI: t=1.5s to 3.5s)
+    7. Per-Channel, Per-Trial Z-Score Normalization
     """
     
-    def __init__(self, target_sfreq=250, l_freq=4.0, h_freq=100.0, notch_freqs=[50.0, 60.0], ica_components=15):
+    def __init__(self, target_sfreq=250, l_freq=0.5, h_freq=100.0, notch_freqs=[50.0, 60.0], ica_components=15, apply_car=True, **kwargs):
         self.target_sfreq = target_sfreq
         self.l_freq = l_freq
         self.h_freq = h_freq
         self.notch_freqs = [f for f in notch_freqs if f is not None]
         self.ica_components = ica_components
+        self.apply_car = apply_car
         
     def resample(self, raw):
         """
-        Resamples the raw MNE object to the target sampling frequency.
-        Must be >= 200Hz to preserve the 100Hz Gamma band.
+        Step 3: Temporal Decimation
+        Resamples the raw MNE object to target frequency (e.g. 250 Hz).
+        Comfortably captures the 30-100 Hz Gamma band (Nyquist = 125 Hz).
         """
         if int(raw.info['sfreq']) != int(self.target_sfreq):
             print(f"Resampling data from {raw.info['sfreq']} Hz to {self.target_sfreq} Hz...")
@@ -29,16 +38,16 @@ class LiteraturePreprocessingPipeline:
         
     def filter_data(self, raw):
         """
-        Applies a bandpass filter (4-100Hz) and a notch filter.
+        Step 2: Bandpass & Notch Filtering
+        Applies a zero-phase FIR bandpass filter (0.5-100Hz) and a notch filter at 50/60Hz.
         """
-        # Pick EEG channels if non-EEG (status, stim) are present
+        # Pick EEG channels
         try:
             raw.pick_types(eeg=True, stim=False, misc=False)
         except Exception:
             pass
 
         print(f"Applying bandpass filter ({self.l_freq} - {self.h_freq} Hz)...")
-        # Ensure nyquist constraint
         max_h_freq = (raw.info['sfreq'] / 2.0) - 1.0
         actual_h_freq = min(self.h_freq, max_h_freq)
         raw.filter(l_freq=self.l_freq, h_freq=actual_h_freq, fir_design='firwin', verbose=False)
@@ -49,11 +58,24 @@ class LiteraturePreprocessingPipeline:
                 print(f"Applying notch filter at {valid_notches} Hz...")
                 raw.notch_filter(freqs=valid_notches, fir_design='firwin', verbose=False)
         return raw
+
+    def apply_spatial_rereference(self, raw):
+        """
+        Step 4: Spatial Re-Referencing
+        Applies Common Average Reference (CAR) across all scalp EEG electrodes.
+        """
+        if self.apply_car:
+            print("Applying Common Average Reference (CAR)...")
+            try:
+                raw.set_eeg_reference('average', projection=False, verbose=False)
+            except Exception as e:
+                print(f"CAR re-referencing skipped: {e}")
+        return raw
         
     def apply_ica(self, raw):
         """
-        Applies Independent Component Analysis (ICA) to remove eye blinks (EOG) 
-        and muscle artifacts (EMG).
+        Step 7: Independent Component Analysis (ICA) Denoising
+        Splits data into independent components to reject eye blinks (EOG) and muscle artifacts (EMG).
         """
         n_channels = len(raw.ch_names)
         if isinstance(self.ica_components, (int, float)) and self.ica_components >= 1:
@@ -74,15 +96,13 @@ class LiteraturePreprocessingPipeline:
             print(f"ICA fit encountered an issue: {e}. Continuing with filtered data.")
             return raw, None
 
-    def epoch_data(self, raw, events, event_id, tmin=0.5, tmax=3.5, baseline=None):
+    def epoch_data(self, raw, events, event_id, tmin=1.5, tmax=3.5, baseline=None):
         """
-        Epochs the data based on given events and time windows.
-        Handles baseline interval safety.
+        Step 5 & 6: Trial Epoching & Visual Cue P300 Window Rejection
+        Extracts the pure Interval of Interest (IoI) spanning t=1.5s to 3.5s (2.0s action interval).
         """
-        print(f"Epoching data from {tmin}s to {tmax}s relative to event onset...")
+        print(f"Epoching pure Action Interval of Interest (IoI: {tmin}s to {tmax}s post-stimulus)...")
         
-        # Determine baseline safety:
-        # If tmin >= 0, standard (None, 0) is invalid in MNE.
         if baseline == (None, 0) and tmin >= 0:
             baseline = None
 
@@ -100,9 +120,8 @@ class LiteraturePreprocessingPipeline:
 
     def zscore_normalize(self, epochs_data):
         """
-        Applies channel-wise Z-score normalization to combat non-stationarity.
-        epochs_data: numpy array of shape [trials, channels, timepoints]
-        Returns normalized array.
+        Step 9: Downstream Normalization (Deep Learning Readiness)
+        Applies per-trial, per-channel Z-score normalization: x_hat = (x - mu) / sigma.
         """
         print("Applying channel-wise Z-score normalization...")
         trials, channels, timepoints = epochs_data.shape
@@ -110,27 +129,25 @@ class LiteraturePreprocessingPipeline:
         
         for i in range(trials):
             scaler = StandardScaler()
-            # Transpose to [timepoints, channels], scale, then transpose back to [channels, timepoints]
             normalized_data[i] = scaler.fit_transform(epochs_data[i].T).T
             
         return normalized_data
 
-    def run_pipeline(self, raw, events=None, event_id=None, tmin=0.5, tmax=3.5, baseline=None):
+    def run_pipeline(self, raw, events=None, event_id=None, tmin=1.5, tmax=3.5, baseline=None):
         """
-        Executes the full pipeline on a raw MNE object.
-        Properly rescales event sample timestamps during resampling.
+        Executes the full literature-compliant preprocessing pipeline on a raw MNE object.
         """
         print("--- Starting Literature-Based Preprocessing Pipeline ---")
         orig_sfreq = raw.info['sfreq']
 
-        # 1. Filter continuous raw
+        # 1. Bandpass & Notch Filtering (0.5 - 100 Hz, 50 Hz Notch)
         raw = self.filter_data(raw)
 
-        # 2. Resample
+        # 2. Temporal Decimation (Resampling to 250 Hz)
         raw = self.resample(raw)
         new_sfreq = raw.info['sfreq']
 
-        # 3. Scale events sample positions if resampling occurred
+        # 3. Synchronize event sample timestamps
         if events is not None:
             scaled_events = events.copy()
             if int(orig_sfreq) != int(new_sfreq):
@@ -138,15 +155,19 @@ class LiteraturePreprocessingPipeline:
         else:
             scaled_events = None
 
-        # 4. ICA Artifact Removal
+        # 4. Spatial Re-referencing (CAR)
+        raw = self.apply_spatial_rereference(raw)
+
+        # 5. ICA Artifact Denoising
         raw, ica = self.apply_ica(raw)
         
-        # 5. Epoching & Normalization
+        # 6. Epoching & Visual Cue P300 Window Rejection (1.5s to 3.5s)
         if scaled_events is not None and event_id is not None:
             epochs = self.epoch_data(raw, scaled_events, event_id, tmin, tmax, baseline=baseline)
             epochs_data = epochs.get_data(copy=True)
+            # 7. Z-Score Normalization
             final_data = self.zscore_normalize(epochs_data)
-            print("--- Pipeline Complete ---")
+            print(f"--- Pipeline Complete: Output Shape {final_data.shape} ---")
             return final_data, epochs.events, epochs
         else:
             print("No events provided. Returning continuous raw data.")
