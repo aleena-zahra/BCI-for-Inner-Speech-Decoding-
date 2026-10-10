@@ -38,4 +38,4 @@ dev = [
 
 # Registers terminal commands for CLI and Streamlit UI
 [project.scripts]
-voice-cli = "voice.cli:main"
+voice-ui = "voice.cli:launch_app"
