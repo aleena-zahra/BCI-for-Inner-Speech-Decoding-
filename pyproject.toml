@@ -1,0 +1,40 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "voice"
+version = "0.1.0"
+description = "A Python library for EEG inner speech data preprocessing and representation analysis."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    { name = "Aleena Zahra", email = "circularbanana0.0@gmail.com" }
+]
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.21.0",
+    "scipy>=1.7.0",
+    "mne>=1.0.0",
+    "scikit-learn>=1.0.0",
+]
+
+# Optional dependencies installed via: pip install voice[ui,docs]
+[project.optional-dependencies]
+ui = [
+    "streamlit>=1.20.0",
+    "plotly>=5.0.0",
+]
+docs = [
+    "mkdocs>=1.4.0",
+    "mkdocs-material>=9.0.0",
+    "mkdocstrings[python]>=0.20.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "black>=22.0.0",
+]
+
+# Expose a command to run the Streamlit app: `voice-ui`
+[project.scripts]
+voice-ui = "voice.cli:run_app"
