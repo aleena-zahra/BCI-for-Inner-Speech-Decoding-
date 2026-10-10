@@ -2,7 +2,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix
-
+import numpy as np
 class CSPSVMClassifier:
     """Classical CSP + Linear SVM Baseline Classifier."""
 

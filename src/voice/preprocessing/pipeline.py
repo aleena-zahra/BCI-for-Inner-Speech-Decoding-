@@ -1,40 +1,51 @@
 import numpy as np
-import mne
-from scipy.signal import butter, filtfilt, iirnotch
+from voice.preprocessing.filtering import (
+    select_time_window,
+    resample_data,
+    apply_bandpass,
+    apply_notch_filter,
+)
+from voice.preprocessing.normalization import baseline_correction, remove_artifacts
 
-class EEGPreprocessor:
-    """Combines DSP filtering (Bandpass, Notch, Resampling) and MNE Epoching."""
 
-    def __init__(self, sfreq: float = 256.0, target_sfreq: float = 128.0):
-        self.sfreq = sfreq
-        self.target_sfreq = target_sfreq
+def preprocess_eeg_dataset(
+    X: np.ndarray,
+    sfreq: float = 256.0,
+    target_sfreq: float = 128.0,
+    lowcut: float = 1.0,
+    highcut: float = 40.0,
+    notch_freq: float = 50.0,
+    t_start: float = 1.5,
+    t_end: float = 3.5,
+    apply_baseline: bool = False,
+    artifact_threshold: float = None,
+    y: np.ndarray = None,
+):
+    """Executes the full EEG cleaning and filtering pipeline on raw trial data."""
+    # 1. Select active time window (e.g., action period 1.5s - 3.5s)
+    X_proc = select_time_window(X, t_start=t_start, t_end=t_end, fs=sfreq)
 
-    def apply_dsp_filters(self, X: np.ndarray, lowcut: float = 1.0, highcut: float = 40.0, notch_freq: float = 50.0) -> np.ndarray:
-        """Applies Butterworth Bandpass, Notch Filter, and Resampling (From Baseline Notebook)."""
-        # 1. Resample
-        n_trials, n_channels, _ = X.shape
-        resampled = np.array([
-            mne.filter.resample(trial, down=self.sfreq / self.target_sfreq, npad="auto")
-            for trial in X
-        ])
+    # 2. Resample signal
+    if sfreq != target_sfreq:
+        X_proc = resample_data(X_proc, original_sfreq=sfreq, target_sfreq=target_sfreq)
 
-        # 2. Bandpass
-        nyq = 0.5 * self.target_sfreq
-        b, a = butter(4, [lowcut / nyq, highcut / nyq], btype='band')
-        filtered = np.zeros_like(resampled)
-        for i in range(resampled.shape[0]):
-            for ch in range(resampled.shape[1]):
-                filtered[i, ch] = filtfilt(b, a, resampled[i, ch])
+    # 3. Apply Bandpass & Notch Filters
+    X_proc = apply_bandpass(X_proc, lowcut=lowcut, highcut=highcut, fs=target_sfreq)
+    X_proc = apply_notch_filter(X_proc, notch_freq=notch_freq, fs=target_sfreq)
 
-        # 3. Notch
-        b_n, a_n = iirnotch(notch_freq, 30, self.target_sfreq)
-        for i in range(filtered.shape[0]):
-            for ch in range(filtered.shape[1]):
-                filtered[i, ch] = filtfilt(b_n, a_n, filtered[i, ch])
+    # 4. Baseline Correction (Optional)
+    if apply_baseline:
+        X_proc = baseline_correction(X_proc)
 
-        return filtered
+    # 5. Artifact Removal (Optional)
+    if artifact_threshold is not None:
+        if y is not None:
+            X_proc, y = remove_artifacts(X_proc, y=y, threshold=artifact_threshold)
+            return X_proc, y
+        else:
+            X_proc, kept_indices = remove_artifacts(X_proc, threshold=artifact_threshold)
 
-    @staticmethod
-    def baseline_correction(X: np.ndarray) -> np.ndarray:
-        """Subtract mean across time for each channel."""
-        return X - np.mean(X, axis=2, keepdims=True)
+    if y is not None:
+        return X_proc, y
+        
+    return X_proc

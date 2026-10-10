@@ -16,6 +16,7 @@ dependencies = [
     "numpy>=1.21.0",
     "scipy>=1.7.0",
     "mne>=1.0.0",
+    "click>=8.0.0",
     "scikit-learn>=1.0.0",
 ]
 
@@ -35,6 +36,7 @@ dev = [
     "black>=22.0.0",
 ]
 
-# Expose a command to run the Streamlit app: `voice-ui`
+# Registers terminal commands for CLI and Streamlit UI
 [project.scripts]
+voice-cli = "voice.cli:main"
 voice-ui = "voice.cli:run_app"
