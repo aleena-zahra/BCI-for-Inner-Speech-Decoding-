@@ -1,3 +1,4 @@
+
 function [Puntos]=Set_up_Estimulos(xCenter,yCenter,Alto,Ancho)
 % create a triangle
 head   = [ xCenter, yCenter-Alto/3 ]; % coordinates of head
@@ -20,4 +21,5 @@ points_iz = [   head-[0,Ancho]         % left corner
                 head+[0,Ancho]         % right corner
                 head-[Alto,0] ];      % vertex
 
+>>>>>>> 13e66b4 (refactor: organize models, eval and examples)
 Puntos={points_ar,points_ab,points_dr,points_iz};

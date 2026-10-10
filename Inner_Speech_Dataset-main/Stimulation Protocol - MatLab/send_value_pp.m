@@ -1,3 +1,4 @@
+
 function [N_dato,Datos_Enviados,Tiempo_parcial,Tiempos_parciales]= send_value_pp (mrk,lptport,dir,time_pause,N_dato,Datos_Enviados,Tiempo_parcial,Tiempos_parciales)
 
 Tiempo_parcial=toc(Tiempo_parcial);

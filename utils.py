@@ -1,6 +1,3 @@
-
-
-
 def resample_data(X, original_sfreq, target_sfreq):
     """
     X shape: [trials, channels, time]
@@ -85,4 +82,3 @@ def remove_artifacts(X, threshold=100):
             keep_trials.append(i)
 
     return X[keep_trials], keep_trials
-

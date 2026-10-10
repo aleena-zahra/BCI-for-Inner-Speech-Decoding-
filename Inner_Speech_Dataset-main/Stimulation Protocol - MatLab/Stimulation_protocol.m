@@ -1,5 +1,6 @@
+
 %% ------------------ Stimulation protocol --------------------------------
-% Developed by Nicolás Nieto and Victoria Peterson.
+% Developed by Nicolï¿½s Nieto and Victoria Peterson.
 % Corresponds to the Inner speech dataset
 %% ----------------------------SET UPs-------------------------------------
 %--------------------------------------------------------------------------
@@ -51,10 +52,10 @@ Experiment.Protocol.Paradigms_order= Paradigms_order;
 T_Concentracion1=0.5;
 % Tiempo entre que aparece el estimulo y comienzo a grabar (Evito P300)
 T_Estimulo=2;
-% Tiempo útil de grabacion
+% Tiempo ï¿½til de grabacion
 T_Imaginacion=2.5;
 % Desaparece el estimulo pero permanece la fix coss (sin parpadeo)
-% Interlvalo útil para caracterizar el baseline de EEG
+% Interlvalo ï¿½til para caracterizar el baseline de EEG
 T_Concentracion2=1;
 % Tiempo de descanso InterTrial variable (Se permite parpadeo)
 T_Descanso_min=1.5;
@@ -128,7 +129,7 @@ Experiment.Estimulos.Alto= Alto;
 %--------------------------------------------------------------------------
 portDir = 'C100';
 lptport = hex2dec(portDir);
-dir = hex2dec('0'); % Código base. Del que parte y al que vuelve dsp de cada marca
+dir = hex2dec('0'); % Cï¿½digo base. Del que parte y al que vuelve dsp de cada marca
 time_pause=0.1;
 
 Experiment.Comunicacion.portDir= portDir;
@@ -151,14 +152,14 @@ Screen('BlendFunction', window, 'GL_SRC_ALPHA', 'GL_ONE_MINUS_SRC_ALPHA');
 Screen('Flip', window);
 % Pixeles centrales
 [xCenter, yCenter] = RectCenter(windowRect);
-% Tamaño del texto
+% Tamaï¿½o del texto
 Screen('TextSize', window, Text_size);
 Screen('TextFont', window, Text_font);
 
 Experiment.Psicotoolbox.xCenter= xCenter;
 Experiment.Psicotoolbox.yCenter= yCenter;
 Experiment.Psicotoolbox.screenNumber= screenNumber;
-%% Pregunta de concentración
+%% Pregunta de concentraciï¿½n
 % Cantidad minima de trials para realizar una regunta
 min_q=3;
 % Cantidad maxima de trials para realizar una regunta
@@ -182,7 +183,7 @@ Experiment.Estimulos.Puntos= Puntos;
 %% ------------------------------------------------------------------------
 %% ---------------------EJECUCION DEL PROTOCOLO----------------------------
 %% ------------------------------------------------------------------------
-% Inicialización
+% Inicializaciï¿½n
 N_dato=1;
 Datos_Enviados=[];
 %% ---------------------Grabacion de Baseline -----------------------------
@@ -208,7 +209,7 @@ mrk = mrks_general(4);
 [N_dato,Datos_Enviados,Tiempo_parcial,Tiempos_parciales]= send_value_pp (mrk,lptport,dir,time_pause,N_dato,Datos_Enviados,Tiempo_parcial,Tiempos_parciales);
 %% ---------------------PROTOCOLO de estimulacion--------------------------
 
-DrawFormattedText(window, '¿Listo para empezar?', 'center', 'center', color_letra);
+DrawFormattedText(window, 'ï¿½Listo para empezar?', 'center', 'center', color_letra);
 Screen('Flip', window);
 WaitSecs(2);
 DrawFormattedText(window, 'Comenzamos!', 'center', 'center', color_letra);
@@ -264,17 +265,17 @@ for bloque=1:N_bloques
         % Tiempo para eliminar el P300
         WaitSecs(T_Estimulo);
         
-        %% Periodo útil de adquisicion
+        %% Periodo ï¿½til de adquisicion
         % MOSTRAR Punto
         Screen('DrawDots', window, [xCenter yCenter], Tamano_punto, color_punto, [], 2);
         Screen('Flip', window);
         % MARCADOR Estimulacion
         mrk = mrks_xTrial(4);
         [N_dato,Datos_Enviados,Tiempo_parcial,Tiempos_parciales]= send_value_pp(mrk,lptport,dir,time_pause,N_dato,Datos_Enviados,Tiempo_parcial,Tiempos_parciales);
-        % Tiempo útil de adquisicion
+        % Tiempo ï¿½til de adquisicion
         WaitSecs(T_Imaginacion);
         
-        %% Periodo de adquisición sin estímulo (para eliminar blinks )
+        %% Periodo de adquisiciï¿½n sin estï¿½mulo (para eliminar blinks )
         % MOSTRAR Punto
         Screen('DrawDots', window, [xCenter yCenter], Tamano_punto, color_punto_2, [], 2);
         Screen('Flip', window);
@@ -308,7 +309,7 @@ for bloque=1:N_bloques
             [N_dato,Datos_Enviados,Tiempo_parcial,Tiempos_parciales]= send_value_pp (mrk,lptport,dir,time_pause,N_dato,Datos_Enviados,Tiempo_parcial,Tiempos_parciales);
             
             % MARCADOR Fin Bloque
-            DrawFormattedText(window, 'Cual fue la última instrucción? \n\n Presione la flecha de la misma', 'center', 'center', color_letra);
+            DrawFormattedText(window, 'Cual fue la ï¿½ltima instrucciï¿½n? \n\n Presione la flecha de la misma', 'center', 'center', color_letra);
             Screen('Flip', window);
             % Nueva cantidad de trials para realizar una nueva pregunta
             N_q= min_q+round(rand(1,1)*(max_q-min_q));
@@ -395,3 +396,4 @@ end
 %% Final
 sca
 clc
+>>>>>>> 13e66b4 (refactor: organize models, eval and examples)

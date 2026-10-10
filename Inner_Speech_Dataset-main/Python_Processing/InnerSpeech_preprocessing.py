@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-# %%
 """
 @author: Nicolás Nieto
 
@@ -387,5 +386,3 @@ EMG_control_single_th(
     t_min_baseline=T_MIN_BASELINE,
     t_max_baseline=T_MAX_BASELINE,
 )
-
-# %%

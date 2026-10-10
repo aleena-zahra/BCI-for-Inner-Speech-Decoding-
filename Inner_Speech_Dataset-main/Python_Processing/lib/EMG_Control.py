@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 
 """
@@ -105,8 +106,6 @@ def EMG_control_single_th(
             X_baseline.filter(low_f, high_f)
 
             FC = int(X_baseline.info["sfreq"])
-            # =============================================================================
-            # =============================================================================
             # EXG7 Control
             Baseline = X_baseline.copy()
             # Select only EMG 1 channels
@@ -125,7 +124,6 @@ def EMG_control_single_th(
                 t_min_baseline,  # noqa
                 t_max_baseline,
             )  # noqa
-            # =============================================================================
             # EXG7 Control
             Baseline = X_baseline.copy()
             Baseline.pick_channels(["EXG8"])
@@ -145,8 +143,6 @@ def EMG_control_single_th(
                 t_max_baseline,
             )  # noqa
             del Baseline, X_baseline
-            # =============================================================================
-            # =============================================================================
             # Load EOG and EMG data
             datatype = "EXG"
             EMG, Y = extract_block_data_from_subject(root_dir, N_S, datatype, N_B)
@@ -172,7 +168,6 @@ def EMG_control_single_th(
             # Initialized the taggin vector
             EMG_reject = np.zeros(EMG._data.shape[0])
             del EMG, EMG_EXG7, EMG_EXG8
-            # =============================================================================
             # In[]: Tagging
             # Initialization
             drop_epoched = []

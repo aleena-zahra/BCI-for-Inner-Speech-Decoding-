@@ -29,4 +29,3 @@ def main():
     print("Confusion Matrix:\n", metrics['confusion_matrix'])
 
 if __name__ == "__main__":
-    main()

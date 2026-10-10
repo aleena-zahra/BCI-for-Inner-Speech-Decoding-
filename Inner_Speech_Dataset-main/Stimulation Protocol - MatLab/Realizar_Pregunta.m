@@ -6,7 +6,7 @@ downKey = KbName('DownArrow');
 leftKey = KbName('LeftArrow');
 rightKey = KbName('RightArrow');
 while exit_q == false
-                % Interrupción por teclado
+                % Interrupciï¿½n por teclado
                 [~,~, keyCode] = KbCheck;
                 if keyCode(upKey)
                     mrk = mrks_clase_q(1);
@@ -21,5 +21,4 @@ while exit_q == false
                     mrk = mrks_clase_q(4);
                     exit_q = true;
                 end
-end
 end

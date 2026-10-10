@@ -1,3 +1,4 @@
+
 function [mrks_general,mrks_modalidad,mrks_clase,mrks_xTrial,mrks_descansos,mrks_clase_q]=Set_up_Marcadores
 
 % Marcadores por LSL
@@ -15,4 +16,5 @@ mrks_descansos = [51];
 % markers_descansos = {'Descanso interbloque' };
 
 mrks_clase_q= [61,62,63,64,65];
+>>>>>>> 13e66b4 (refactor: organize models, eval and examples)
 % markers_clase_q = {'Arriba', 'Abajo', 'Derecha', 'Izquierda' , 'Seleccionar'}
