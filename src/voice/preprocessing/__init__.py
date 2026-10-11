@@ -1,4 +1,4 @@
-"""EEG data preprocessing module."""
+"EEG data preprocessing module."""
 
 from voice.preprocessing.filtering import (
     select_time_window,
@@ -10,7 +10,7 @@ from voice.preprocessing.normalization import (
     baseline_correction,
     remove_artifacts,
 )
-from voice.preprocessing.pipeline import preprocess_eeg_dataset
+from voice.preprocessing.pipeline import preprocess_eeg_dataset, EEGPreprocessor
 
 __all__ = [
     "select_time_window",
@@ -20,4 +20,5 @@ __all__ = [
     "baseline_correction",
     "remove_artifacts",
     "preprocess_eeg_dataset",
+    "EEGPreprocessor"
 ]
