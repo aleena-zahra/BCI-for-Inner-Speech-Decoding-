@@ -71,7 +71,9 @@ def load_bids_trials(
         )
         if not len(epochs):
             continue
-        signal_parts.append(epochs.get_data())
+        # MNE stores EEG in volts; use microvolts consistently with the UI and
+        # amplitude-rejection threshold used by EEGPreprocessor.
+        signal_parts.append((epochs.get_data() * 1e6).astype(np.float32, copy=False))
         label_parts.append(epochs.events[:, 2])
         subject_parts.append(np.repeat(meta["subject"], len(epochs)))
         run_parts.append(np.repeat(meta["run_id"], len(epochs)))
@@ -82,7 +84,7 @@ def load_bids_trials(
     if len(present_codes) < 2:
         raise ValueError("At least two event classes must have complete trials")
     return EEGTrials(
-        signals=np.concatenate(signal_parts).astype(np.float64, copy=False),
+        signals=np.concatenate(signal_parts).astype(np.float32, copy=False),
         labels=np.concatenate(label_parts).astype(int, copy=False),
         subjects=np.concatenate(subject_parts),
         runs=np.concatenate(run_parts),

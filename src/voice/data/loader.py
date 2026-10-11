@@ -20,7 +20,14 @@ def extract_bids_archive(archive: str | os.PathLike, destination: str | os.PathL
     destination = Path(destination).resolve()
     destination.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as zipped:
-        for member in zipped.infolist():
+        members = zipped.infolist()
+        eeg_members = [member for member in members if PurePosixPath(member.filename).suffix.lower() in EEG_SUFFIXES]
+        if not eeg_members:
+            raise ValueError(
+                "This ZIP contains no supported BIDS EEG recording (.bdf, .set, .fif, or .vhdr). "
+                "CSV and MATLAB (.mat) archives are not supported by this Phase 1 loader."
+            )
+        for member in members:
             name = member.filename.replace("\\", "/")
             candidate = (destination / Path(*PurePosixPath(name).parts)).resolve()
             if candidate != destination and destination not in candidate.parents:
@@ -122,11 +129,29 @@ def _events_from_tsv(raw, events_file: str) -> tuple[np.ndarray, dict[str, int],
         raise ValueError(f"Events table contains no labeled trials: {events_file}")
     names = sorted(labels.unique())
     event_id = {name: index + 1 for index, name in enumerate(names)}
-    onset = pd.to_numeric(table["onset"], errors="coerce").to_numpy()
-    if not np.isfinite(onset).all():
+    onset_values = pd.to_numeric(table["onset"], errors="coerce").to_numpy(dtype=float)
+    if not np.isfinite(onset_values).all():
         raise ValueError(f"Events table has invalid onset values: {events_file}")
-    sample = np.rint(onset * raw.info["sfreq"]).astype(int) + raw.first_samp
-    inside = (sample >= raw.first_samp) & (sample < raw.last_samp)
+    # BIDS specifies seconds, but some published datasets (including ds004196)
+    # store millisecond values in their TSV despite the standard. Choose the
+    # scale that places the greatest number of labeled events in this recording;
+    # seconds wins ties, preserving standard BIDS behavior.
+    duration_seconds = raw.n_times / raw.info["sfreq"]
+    scales = (1.0, 1e-3, 1e-6)
+    valid_counts = [
+        int(np.count_nonzero((onset_values * scale >= 0) & (onset_values * scale < duration_seconds)))
+        for scale in scales
+    ]
+    scale_index = int(np.argmax(valid_counts))
+    if valid_counts[scale_index] == 0 or valid_counts[scale_index] < 0.9 * len(onset_values):
+        raise ValueError(
+            f"Could not map event onsets in {events_file} to the recording duration "
+            f"({duration_seconds:.1f}s); check the onset units and event table."
+        )
+    onset_seconds = onset_values * scales[scale_index]
+    sample = np.rint(onset_seconds * raw.info["sfreq"]).astype(int) + raw.first_samp
+    recording_stop = raw.first_samp + raw.n_times
+    inside = (sample >= raw.first_samp) & (sample < recording_stop)
     sample, labels = sample[inside], labels.iloc[np.flatnonzero(inside)]
     events = np.column_stack((sample, np.zeros(len(sample), dtype=int), [event_id[x] for x in labels]))
     if not len(events):

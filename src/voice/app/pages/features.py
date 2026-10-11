@@ -1,17 +1,17 @@
 import streamlit as st
 
 st.header("Features")
-
-if not st.session_state.proc_data:
+if not st.session_state.proc_data.get("active"):
     st.info("Run preprocessing first.")
     st.stop()
 
-patch_length = st.slider("Patch length", min_value=10, max_value=50, value=25, key="patch_length")
-stride = st.slider("Patch stride", min_value=2, max_value=20, value=6, key="patch_stride")
+st.write("The CSP features are fitted inside each training fold to prevent test-data leakage.")
+n_components = st.slider("CSP components per frequency band", min_value=2, max_value=6, value=4)
+if st.button("Save feature configuration", type="primary"):
+    st.session_state.tokenized_data["active"] = {"n_components": n_components}
+    st.session_state.trained_models.clear()
+    st.session_state.latent_embeddings.clear()
+    st.success("Feature configuration saved. CSP fitting will happen during model evaluation.")
 
-if st.button("Extract features", type="primary"):
-    st.session_state.tokenized_data["active"] = {
-        "patch_length": patch_length,
-        "stride": stride,
-    }
-    st.success("Feature settings recorded. Connect the tokenizer here next.")
+if st.session_state.tokenized_data.get("active"):
+    st.caption(f"Configured {st.session_state.tokenized_data['active']['n_components']} CSP components per band.")

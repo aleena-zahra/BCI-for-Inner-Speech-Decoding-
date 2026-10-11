@@ -33,7 +33,7 @@ class InnerSpeechPipeline:
 
     def fit(self, signals: np.ndarray, labels: np.ndarray) -> "InnerSpeechPipeline":
         """Fit the complete pipeline on trials and labels."""
-        processed_signals = self.preprocessor.fit_transform(signals)
+        processed_signals, labels, _ = self.preprocessor.transform_with_indices(signals, labels)
         features = self.feature_extractor.fit_transform(processed_signals, labels)
         self.classifier.fit(features, labels)
         self.training_features = features
@@ -47,7 +47,7 @@ class InnerSpeechPipeline:
         if len(signals) != len(labels) or len(signals) == 0:
             raise ValueError("Evaluation signals and labels must be non-empty and aligned")
 
-        processed_signals = self.preprocessor.transform(signals)
+        processed_signals, labels, _ = self.preprocessor.transform_with_indices(signals, labels)
         features = self.feature_extractor.transform(processed_signals)
         return self.classifier.evaluate(features, labels)
 
@@ -55,7 +55,7 @@ class InnerSpeechPipeline:
         """Return CSP features using only preprocessing and CSP state fitted on training data."""
         if not self.is_fitted:
             raise RuntimeError("Call fit() before transforming features.")
-        processed = self.preprocessor.transform(signals)
+        processed = self.preprocessor.transform_with_indices(signals)[0]
         return self.feature_extractor.transform(processed)
 
     def _fresh(self) -> "InnerSpeechPipeline":
@@ -104,11 +104,14 @@ class InnerSpeechPipeline:
             random_state=self.random_state, stratify=labels,
         )
         model = self._fresh().fit(signals[train_idx], labels[train_idx])
-        features = model.transform_features(signals[test_idx])
-        metrics = model.classifier.evaluate(features, labels[test_idx])
+        processed, y_test, kept = model.preprocessor.transform_with_indices(
+            signals[test_idx], labels[test_idx]
+        )
+        features = model.feature_extractor.transform(processed)
+        metrics = model.classifier.evaluate(features, y_test)
         result = self._summarize(
-            labels[test_idx], model.classifier.model.predict(features),
-            subjects[test_idx], features, np.unique(labels),
+            y_test, model.classifier.model.predict(features),
+            subjects[test_idx][kept], features, np.unique(labels),
         )
         result.update(metrics)
         return result
@@ -132,12 +135,15 @@ class InnerSpeechPipeline:
             if len(np.unique(labels[train_mask])) < 2:
                 raise ValueError(f"Training data without subject {subject} has fewer than two classes")
             model = self._fresh().fit(signals[train_mask], labels[train_mask])
-            test_features = model.transform_features(signals[test_mask])
+            processed, test_labels, kept = model.preprocessor.transform_with_indices(
+                signals[test_mask], labels[test_mask]
+            )
+            test_features = model.feature_extractor.transform(processed)
             prediction = model.classifier.model.predict(test_features)
-            fold_scores[str(subject)] = float(accuracy_score(labels[test_mask], prediction))
-            true_parts.append(labels[test_mask])
+            fold_scores[str(subject)] = float(accuracy_score(test_labels, prediction))
+            true_parts.append(test_labels)
             pred_parts.append(prediction)
-            subject_parts.append(subjects[test_mask])
+            subject_parts.append(subjects[test_mask][kept])
             feature_parts.append(test_features)
         y_true = np.concatenate(true_parts)
         y_pred = np.concatenate(pred_parts)
