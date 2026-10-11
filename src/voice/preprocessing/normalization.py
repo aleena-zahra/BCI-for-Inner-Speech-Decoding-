@@ -2,6 +2,16 @@ import numpy as np
 from typing import Tuple
 
 
+def zscore_normalize(X: np.ndarray, epsilon: float = 1e-8) -> np.ndarray:
+    """Normalize each trial/channel along time, safely handling constant channels."""
+    values = np.asarray(X, dtype=np.float32)
+    if values.ndim != 3 or not np.isfinite(values).all() or epsilon <= 0:
+        raise ValueError("Normalization requires finite trial/channel/time data and positive epsilon")
+    mean = values.mean(axis=-1, keepdims=True)
+    std = values.std(axis=-1, keepdims=True)
+    return (values - mean) / np.maximum(std, epsilon)
+
+
 def baseline_correction(X: np.ndarray) -> np.ndarray:
     """Subtracts the mean time signal for each channel across each trial."""
     baseline = np.mean(X, axis=2, keepdims=True)

@@ -7,6 +7,7 @@ from voice.models.eegconformer import EEGConformer
 from voice.models.eegnet import EEGNet
 from voice.models.training import evaluate_deep_model
 from voice.evaluation.interpretability import conformer_attention_summary, eegnet_channel_saliency
+from voice.preprocessing.pipeline import EEGPreprocessor
 
 
 @pytest.mark.parametrize("architecture", ["EEGNet", "EEGConformer"])
@@ -25,10 +26,13 @@ def test_deep_model_training_returns_heldout_predictions(architecture):
         batch_size=8,
         patch_len=16,
         stride=8,
+        preprocessor=EEGPreprocessor(sfreq=128, target_sfreq=128, t_start=0, t_end=1, zscore=True),
     )
     assert len(result["y_true"]) == len(result["y_pred"])
     assert result["features"].shape[0] == len(result["y_true"])
     assert result["confusion_matrix"].shape == (3, 3)
+    assert len(result["fold_test_subjects"]["trial holdout"]) == len(result["y_true"])
+    assert result["fold_preprocessors"]["trial holdout"].zscore
 
 
 def test_conformer_patch_shape_and_eegnet_forward():
@@ -45,3 +49,7 @@ def test_conformer_patch_shape_and_eegnet_forward():
     importance = eegnet_channel_saliency(eegnet, signals)
     assert importance.shape == (8,)
     assert np.isclose(importance.sum(), 1.0)
+    head_one = conformer_attention_summary(conformer, signals.numpy(), head=0, batch_size=1)
+    head_batch = conformer_attention_summary(conformer, signals.numpy(), head=0, batch_size=2)
+    assert np.allclose(head_one[0], head_batch[0], atol=1e-6)
+    assert np.allclose(head_one[0].sum(axis=-1), 1.0, atol=1e-6)

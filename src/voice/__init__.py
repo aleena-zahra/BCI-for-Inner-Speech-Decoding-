@@ -5,6 +5,7 @@ from voice.data.loader import (
 )
 from voice.data.trials import EEGTrials, load_bids_trials
 from voice.preprocessing.pipeline import EEGPreprocessor
+from voice.preprocessing.literature import LiteraturePreprocessingPipeline
 from voice.evaluation.features import MultiBandCSPExtractor
 from voice.models.svm import CSPSVMClassifier
 from voice.pipeline import InnerSpeechPipeline
@@ -18,6 +19,7 @@ __all__ = [
     "EEGTrials",
     "load_bids_trials",
     "EEGPreprocessor",
+    "LiteraturePreprocessingPipeline",
     "MultiBandCSPExtractor",
     "CSPSVMClassifier",
     "InnerSpeechPipeline",

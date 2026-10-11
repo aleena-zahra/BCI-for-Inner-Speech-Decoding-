@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from typing import Callable
+from copy import deepcopy
 
 import numpy as np
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
-from sklearn.model_selection import train_test_split
+from voice.evaluation.splits import evaluation_folds
 
 
 class EEGTrainer:
@@ -177,6 +178,8 @@ def evaluate_deep_model(
     test_size: float = 0.2,
     validation_size: float = 0.15,
     seed: int = 42,
+    preprocessor=None,
+    ica_exclusions=None,
     progress_callback: Callable[[str, int, int, dict[str, float]], None] | None = None,
 ) -> dict:
     """Train one or more folds and return scores plus fold-aligned latents.
@@ -184,6 +187,9 @@ def evaluate_deep_model(
     ``strategy='loso'`` holds out each complete subject. ``strategy='trial'``
     makes a stratified trial holdout. Labels are encoded internally to 0..K-1;
     ``classes`` retains their original IDs.
+    When a preprocessor is provided, input signals are raw microvolt trials;
+    preprocessing/ICA fit only training data. ``ica_exclusions`` holds reviewed
+    component indices separately for each named fold.
     """
     X, y, subject_ids = np.asarray(signals), np.asarray(labels), np.asarray(subjects)
     if X.ndim != 3 or len(X) != len(y) or len(y) != len(subject_ids):
@@ -193,43 +199,34 @@ def evaluate_deep_model(
         raise ValueError("At least two classes are required to train a deep model")
     label_to_index = {label: index for index, label in enumerate(classes.tolist())}
     encoded = np.asarray([label_to_index[label] for label in y], dtype=np.int64)
-    all_indices = np.arange(len(y))
-    if strategy == "trial":
-        counts = np.unique(encoded, return_counts=True)[1]
-        if counts.min() < 2:
-            raise ValueError("Trial holdout needs at least two examples of every class")
-        trainval, test = train_test_split(
-            all_indices, test_size=test_size, random_state=seed, stratify=encoded
-        )
-        folds = [("trial holdout", trainval, test)]
-    elif strategy == "loso":
-        if len(np.unique(subject_ids)) < 2:
-            raise ValueError("LOSO evaluation requires at least two subjects")
-        folds = []
-        for subject in np.unique(subject_ids):
-            test = np.flatnonzero(subject_ids == subject)
-            trainval = np.flatnonzero(subject_ids != subject)
-            if len(np.unique(encoded[trainval])) < 2:
-                raise ValueError(f"Training data without subject {subject} has fewer than two classes")
-            folds.append((str(subject), trainval, test))
-    else:
-        raise ValueError("strategy must be 'trial' or 'loso'")
+    folds = evaluation_folds(encoded, subject_ids, strategy=strategy, deep=True,
+                             test_size=test_size, validation_size=validation_size, seed=seed)
 
     models, histories, fold_latents, fold_test_signals, fold_true_labels = {}, {}, {}, {}, {}
+    fold_test_subjects, fold_preprocessors = {}, {}
     true_parts, pred_parts, subject_parts = [], [], []
-    for fold_number, (fold_name, trainval, test) in enumerate(folds):
-        train, validation = train_test_split(
-            trainval,
-            test_size=validation_size,
-            random_state=seed + fold_number,
-            stratify=encoded[trainval],
-        )
+    for fold_number, (fold_name, train, validation, test) in enumerate(folds):
+        if preprocessor is not None:
+            processor = deepcopy(preprocessor)
+            if ica_exclusions is not None:
+                processor.ica_exclude = tuple(ica_exclusions.get(fold_name, ()))
+            X_train, y_train, _ = processor.fit_transform_with_indices(X[train], encoded[train])
+            X_validation, y_validation, _ = processor.transform_with_indices(X[validation], encoded[validation])
+            X_test, y_test, kept_test = processor.transform_with_indices(X[test], encoded[test])
+            retained_test = test[kept_test]
+            fold_preprocessors[fold_name] = processor
+        else:
+            X_train, y_train = X[train], encoded[train]
+            X_validation, y_validation = X[validation], encoded[validation]
+            X_test, y_test, retained_test = X[test], encoded[test], test
+        if len(np.unique(y_train)) != len(classes):
+            raise ValueError(f"Preprocessing removed training examples of a class in fold {fold_name}")
         torch = __import__("torch")
         torch.manual_seed(seed + fold_number)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed + fold_number)
         model = _new_model(
-            model_name, len(classes), X.shape[1], X.shape[2],
+            model_name, len(classes), X_train.shape[1], X_train.shape[2],
             patch_len, stride, use_revin,
         )
         trainer = EEGTrainer(model, batch_size=batch_size, seed=seed + fold_number)
@@ -239,18 +236,19 @@ def evaluate_deep_model(
                 progress_callback(current_fold, epoch, total_epochs, record)
 
         trainer.fit(
-            X[train], encoded[train], X[validation], encoded[validation],
+            X_train, y_train, X_validation, y_validation,
             epochs=epochs, progress_callback=report,
         )
-        predictions, probabilities = trainer.predict(X[test])
-        fold_latents[fold_name] = extract_model_embeddings(model, X[test], device=str(trainer.device))
-        fold_test_signals[fold_name] = np.asarray(X[test], dtype=np.float32)
-        fold_true_labels[fold_name] = classes[encoded[test]]
+        predictions, probabilities = trainer.predict(X_test)
+        fold_latents[fold_name] = extract_model_embeddings(model, X_test, device=str(trainer.device))
+        fold_test_signals[fold_name] = np.asarray(X_test, dtype=np.float32)
+        fold_true_labels[fold_name] = classes[y_test]
+        fold_test_subjects[fold_name] = subject_ids[retained_test]
         models[fold_name] = model.to("cpu")
         histories[fold_name] = trainer.history
-        true_parts.append(encoded[test])
+        true_parts.append(y_test)
         pred_parts.append(predictions)
-        subject_parts.append(subject_ids[test])
+        subject_parts.append(subject_ids[retained_test])
 
     y_true_encoded = np.concatenate(true_parts)
     y_pred_encoded = np.concatenate(pred_parts)
@@ -269,6 +267,8 @@ def evaluate_deep_model(
         "fold_latents": fold_latents,
         "fold_test_signals": fold_test_signals,
         "fold_true_labels": fold_true_labels,
+        "fold_test_subjects": fold_test_subjects,
+        "fold_preprocessors": fold_preprocessors,
         "models": models,
         "histories": histories,
         "strategy": strategy,

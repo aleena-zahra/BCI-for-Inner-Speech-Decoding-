@@ -10,6 +10,7 @@ from sklearn.model_selection import train_test_split
 from voice.evaluation.features import MultiBandCSPExtractor
 from voice.models.svm import CSPSVMClassifier
 from voice.preprocessing.pipeline import EEGPreprocessor
+from voice.evaluation.splits import evaluation_folds
 
 
 class InnerSpeechPipeline:
@@ -24,7 +25,7 @@ class InnerSpeechPipeline:
         random_state: int = 42,
     ):
         self.preprocessor = preprocessor or EEGPreprocessor()
-        self.feature_extractor = feature_extractor or MultiBandCSPExtractor()
+        self.feature_extractor = feature_extractor or MultiBandCSPExtractor(sfreq=self.preprocessor.target_sfreq)
         self.classifier = classifier or CSPSVMClassifier()
         self.test_size = test_size
         self.random_state = random_state
@@ -33,7 +34,7 @@ class InnerSpeechPipeline:
 
     def fit(self, signals: np.ndarray, labels: np.ndarray) -> "InnerSpeechPipeline":
         """Fit the complete pipeline on trials and labels."""
-        processed_signals, labels, _ = self.preprocessor.transform_with_indices(signals, labels)
+        processed_signals, labels, _ = self.preprocessor.fit_transform_with_indices(signals, labels)
         features = self.feature_extractor.fit_transform(processed_signals, labels)
         self.classifier.fit(features, labels)
         self.training_features = features
@@ -91,7 +92,7 @@ class InnerSpeechPipeline:
         }
 
     def evaluate_trial_holdout(
-        self, signals: np.ndarray, labels: np.ndarray, subjects: np.ndarray
+        self, signals: np.ndarray, labels: np.ndarray, subjects: np.ndarray, *, ica_exclusions=None
     ) -> dict[str, Any]:
         """Stratified trial holdout; preprocessing and CSP are refit on train only."""
         signals, labels, subjects = np.asarray(signals), np.asarray(labels), np.asarray(subjects)
@@ -99,11 +100,13 @@ class InnerSpeechPipeline:
             raise ValueError("Signals, labels, and subjects must have matching lengths")
         if len(np.unique(labels)) < 2 or np.min(np.unique(labels, return_counts=True)[1]) < 2:
             raise ValueError("Trial holdout needs at least two examples of every class")
-        train_idx, test_idx = train_test_split(
-            np.arange(len(labels)), test_size=self.test_size,
-            random_state=self.random_state, stratify=labels,
-        )
-        model = self._fresh().fit(signals[train_idx], labels[train_idx])
+        _, train_idx, _, test_idx = evaluation_folds(
+            labels, subjects, test_size=self.test_size, seed=self.random_state
+        )[0]
+        model = self._fresh()
+        if ica_exclusions is not None:
+            model.preprocessor.ica_exclude = tuple(ica_exclusions.get("trial holdout", ()))
+        model.fit(signals[train_idx], labels[train_idx])
         processed, y_test, kept = model.preprocessor.transform_with_indices(
             signals[test_idx], labels[test_idx]
         )
@@ -117,7 +120,7 @@ class InnerSpeechPipeline:
         return result
 
     def evaluate_leave_one_subject_out(
-        self, signals: np.ndarray, labels: np.ndarray, subjects: np.ndarray
+        self, signals: np.ndarray, labels: np.ndarray, subjects: np.ndarray, *, ica_exclusions=None
     ) -> dict[str, Any]:
         """Evaluate every subject using a model trained on all other subjects."""
         signals, labels, subjects = np.asarray(signals), np.asarray(labels), np.asarray(subjects)
@@ -129,12 +132,16 @@ class InnerSpeechPipeline:
         all_classes = np.unique(labels)
         true_parts, pred_parts, subject_parts, feature_parts = [], [], [], []
         fold_scores = {}
-        for subject in unique_subjects:
-            test_mask = subjects == subject
+        for subject, train_idx, _, test_idx in evaluation_folds(labels, subjects, strategy="loso"):
+            test_mask = np.zeros(len(labels), dtype=bool)
+            test_mask[test_idx] = True
             train_mask = ~test_mask
             if len(np.unique(labels[train_mask])) < 2:
                 raise ValueError(f"Training data without subject {subject} has fewer than two classes")
-            model = self._fresh().fit(signals[train_mask], labels[train_mask])
+            model = self._fresh()
+            if ica_exclusions is not None:
+                model.preprocessor.ica_exclude = tuple(ica_exclusions.get(subject, ()))
+            model.fit(signals[train_idx], labels[train_idx])
             processed, test_labels, kept = model.preprocessor.transform_with_indices(
                 signals[test_mask], labels[test_mask]
             )

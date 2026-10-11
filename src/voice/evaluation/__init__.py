@@ -4,24 +4,20 @@ from voice.evaluation.metrics import evaluate_classifier
 
 __all__ = [
     "LatentSpaceAuditor",
+    "ClusteringMetrics",
     "eegnet_channel_saliency",
     "conformer_attention_summary",
     "evaluate_classifier",
-    "evaluate_concept_mapped_transfer",
 ]
 
 
 def __getattr__(name: str):
-    if name == "LatentSpaceAuditor":
-        from voice.evaluation.latent_space import LatentSpaceAuditor
+    if name in {"LatentSpaceAuditor", "ClusteringMetrics"}:
+        from voice.evaluation import latent_space
 
-        return LatentSpaceAuditor
+        return getattr(latent_space, name)
     if name in {"eegnet_channel_saliency", "conformer_attention_summary"}:
         from voice.evaluation import interpretability
 
         return getattr(interpretability, name)
-    if name == "evaluate_concept_mapped_transfer":
-        from voice.evaluation.transferlearning import evaluate_concept_mapped_transfer
-
-        return evaluate_concept_mapped_transfer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

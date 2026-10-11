@@ -1,8 +1,10 @@
 import streamlit as st
+import pandas as pd
 
 from voice.evaluation.features import MultiBandCSPExtractor
 from voice.pipeline import InnerSpeechPipeline
 from voice.preprocessing.pipeline import EEGPreprocessor
+from voice.evaluation.splits import evaluation_folds
 
 st.header("Training and evaluation")
 processed = st.session_state.proc_data.get("active")
@@ -23,8 +25,48 @@ if model_name != "CSP + SVM":
     batch_size = st.select_slider("Batch size", options=[8, 16, 32, 64], value=16)
     st.caption("PyTorch is optional. Install it with `pip install -e '.[deep-learning]'` to enable these models.")
 
+source = raw_dataset["trials"]
+settings = dict(processed["settings"])
+strategy = "loso" if evaluation == "Leave one subject out" else "trial"
+deep = model_name != "CSP + SVM"
+ica_exclusions = {}
+if settings.get("ica_components") is not None:
+    # Preview component indices cannot be transferred to independently fitted folds.
+    settings["ica_exclude"] = ()
+    review_group = f"{'deep' if deep else 'svm'}:{strategy}"
+    reviews = processed.setdefault("ica_reviews", {}).setdefault(review_group, {})
+    with st.expander("Review ICA on training folds before excluding components"):
+        st.caption("Each decomposition uses only that fold's training trials. Preview exclusions from the Preprocessing page are not reused. Folds without saved exclusions perform decomposition only.")
+        try:
+            folds = evaluation_folds(source.labels, source.subjects, strategy=strategy, deep=deep)
+            fold = st.selectbox("ICA review fold", [item[0] for item in folds], key=f"ica-fold-{review_group}")
+            indices = next(item[1] for item in folds if item[0] == fold)
+            if st.button("Fit ICA for this training fold", key=f"fit-ica-{review_group}"):
+                reviewer = EEGPreprocessor(**settings)
+                with st.spinner("Fitting a training-only ICA decomposition…"):
+                    reviewer.fit(source.signals[indices])
+                reviews[fold] = {"processor": reviewer, "exclude": ()}
+                st.session_state.pop(f"exclude-ica-{review_group}-{fold}", None)
+            review = reviews.get(fold)
+            if review:
+                reviewer = review["processor"]
+                component = int(st.number_input("Inspect training-fold component", 0, reviewer.ica_.n_components_ - 1, 0, key=f"inspect-ica-{review_group}-{fold}"))
+                sources = reviewer.ica_sources(source.signals[indices[:1]])
+                st.line_chart(pd.DataFrame({"ICA activation": sources[0, component]}))
+                st.bar_chart(pd.DataFrame({"Spatial loading": reviewer.ica_.get_components()[:, component]}, index=source.channel_names))
+                excluded = st.text_input("Reviewed exclusions for this fold", value=",".join(map(str, review["exclude"])), key=f"exclude-ica-{review_group}-{fold}")
+                if st.button("Save reviewed ICA exclusions", key=f"save-ica-{review_group}-{fold}"):
+                    selected = tuple(int(value.strip()) for value in excluded.split(",") if value.strip())
+                    if any(index < 0 or index >= reviewer.ica_.n_components_ for index in selected) or len(set(selected)) >= reviewer.ica_.n_components_:
+                        raise ValueError("Exclusions must be valid zero-based indices and retain at least one component")
+                    review["exclude"] = selected
+                    st.success(f"Saved exclusions for {fold}: {selected or 'none'}")
+                st.caption(f"Saved fold exclusions: {review['exclude'] or 'none'}")
+        except Exception as exc:
+            st.error(f"ICA review failed: {exc}")
+    ica_exclusions = {name: review["exclude"] for name, review in reviews.items()}
+
 if st.button("Train and evaluate", type="primary"):
-    settings = dict(processed["settings"])
     try:
         if model_name == "CSP + SVM":
             preprocessor = EEGPreprocessor(**settings)
@@ -37,32 +79,21 @@ if st.button("Train and evaluate", type="primary"):
             with st.spinner("Fitting CSP and SVM on training folds…"):
                 if evaluation == "Leave one subject out":
                     result = pipeline.evaluate_leave_one_subject_out(
-                        source.signals, source.labels, source.subjects
+                        source.signals, source.labels, source.subjects, ica_exclusions=ica_exclusions
                     )
                 else:
                     result = pipeline.evaluate_trial_holdout(
-                        source.signals, source.labels, source.subjects
+                        source.signals, source.labels, source.subjects, ica_exclusions=ica_exclusions
                     )
             st.session_state.trained_models["active"] = {
                 "kind": "CSP + SVM", "pipeline": pipeline, "result": result,
             }
-            # Keep a separately fitted source model for the optional target
-            # dataset experiment; held-out metrics above remain fold-isolated.
-            source_pipeline = InnerSpeechPipeline(
-                preprocessor=EEGPreprocessor(**settings),
-                feature_extractor=MultiBandCSPExtractor(
-                    n_components=feature_settings["n_components"],
-                    sfreq=settings["target_sfreq"],
-                ),
-            )
-            source_pipeline.fit(source.signals, source.labels)
-            st.session_state.trained_models["active"]["source_pipeline"] = source_pipeline
         else:
             from voice.models.training import evaluate_deep_model
 
             progress = st.progress(0, text="Preparing training folds…")
             status = st.empty()
-            fold_names = sorted(set(processed["subjects"]))
+            fold_names = sorted(set(source.subjects))
             subject_count = len(fold_names) if evaluation == "Leave one subject out" else 1
 
             def report(fold, epoch, total_epochs, metrics):
@@ -74,7 +105,7 @@ if st.button("Train and evaluate", type="primary"):
                 )
 
             result = evaluate_deep_model(
-                processed["signals"], processed["labels"], processed["subjects"],
+                source.signals, source.labels, source.subjects,
                 model_name=model_name,
                 strategy="loso" if evaluation == "Leave one subject out" else "trial",
                 epochs=int(epochs),
@@ -83,6 +114,8 @@ if st.button("Train and evaluate", type="primary"):
                 stride=feature_settings.get("stride", 6),
                 use_revin=feature_settings.get("use_revin", False),
                 progress_callback=report,
+                preprocessor=EEGPreprocessor(**settings),
+                ica_exclusions=ica_exclusions,
             )
             result["evaluation"] = evaluation
             st.session_state.trained_models["active"] = {"kind": model_name, "result": result}
