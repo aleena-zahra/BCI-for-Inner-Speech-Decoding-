@@ -7,6 +7,7 @@ class CSPSVMClassifier:
     """Classical CSP + Linear SVM Baseline Classifier."""
 
     def __init__(self, C: float = 1.0):
+        self.C = C
         self.model = Pipeline([
             ('Scaler', StandardScaler()),
             ('SVM', SVC(kernel='linear', C=C, probability=True))
