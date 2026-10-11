@@ -27,12 +27,14 @@ class InnerSpeechPipeline:
         self.test_size = test_size
         self.random_state = random_state
         self.is_fitted = False
+        self.training_features: np.ndarray | None = None
 
     def fit(self, signals: np.ndarray, labels: np.ndarray) -> "InnerSpeechPipeline":
         """Fit the complete pipeline on trials and labels."""
         processed_signals = self.preprocessor.fit_transform(signals)
         features = self.feature_extractor.fit_transform(processed_signals, labels)
         self.classifier.fit(features, labels)
+        self.training_features = features
         self.is_fitted = True
         return self
 
@@ -40,10 +42,19 @@ class InnerSpeechPipeline:
         """Preprocess, transform, and evaluate new labeled trials."""
         if not self.is_fitted:
             raise RuntimeError("Call fit() before evaluate().")
+        if len(signals) != len(labels) or len(signals) == 0:
+            raise ValueError("Evaluation signals and labels must be non-empty and aligned")
 
         processed_signals = self.preprocessor.transform(signals)
         features = self.feature_extractor.transform(processed_signals)
         return self.classifier.evaluate(features, labels)
+
+    def transform_features(self, signals: np.ndarray) -> np.ndarray:
+        """Return CSP features using only preprocessing and CSP state fitted on training data."""
+        if not self.is_fitted:
+            raise RuntimeError("Call fit() before transforming features.")
+        processed = self.preprocessor.transform(signals)
+        return self.feature_extractor.transform(processed)
 
     def fit_evaluate(self, signals: np.ndarray, labels: np.ndarray) -> dict[str, Any]:
         """Split data, fit the pipeline, and return held-out metrics."""
