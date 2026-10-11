@@ -71,7 +71,9 @@ def load_bids_trials(
         )
         if not len(epochs):
             continue
-        signal_parts.append(epochs.get_data())
+        # MNE stores EEG in volts; use microvolts consistently with the UI and
+        # amplitude-rejection threshold used by EEGPreprocessor.
+        signal_parts.append(epochs.get_data() * 1e6)
         label_parts.append(epochs.events[:, 2])
         subject_parts.append(np.repeat(meta["subject"], len(epochs)))
         run_parts.append(np.repeat(meta["run_id"], len(epochs)))
