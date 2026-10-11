@@ -1,4 +1,4 @@
-"EEG data preprocessing module."""
+"""EEG data preprocessing module."""
 
 from voice.preprocessing.filtering import (
     select_time_window,

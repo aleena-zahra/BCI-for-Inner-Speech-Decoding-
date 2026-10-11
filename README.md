@@ -1,5 +1,20 @@
 # EEG Imagined Speech Decoding -- Proof of Concept
 
+## Packaged Voice dashboard
+
+Install the library and UI dependencies from this repository:
+
+```powershell
+python -m pip install -e ".[ui]"
+voice-ui --server.address=127.0.0.1 --server.port=8501
+```
+
+Open the URL printed by Streamlit. Stop the server with `Ctrl+C` in its terminal.
+The packaged dashboard has Dataset, Preprocessing, Features, Training, and
+Interpretability pages. Currently, these pages register datasets and record
+settings; they do not execute EEG processing or model training. The separate
+`POC/app.py` contains the more connected experimental workflow described below.
+
 A Streamlit application demonstrating the full 9-stage methodology pipeline
 end to end: dataset collection, EEG preprocessing, dual decoding models
 (EEGNet baseline + Conformer representation model), embedding extraction,

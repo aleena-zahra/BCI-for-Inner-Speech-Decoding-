@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import streamlit as st
 
 st.set_page_config(
@@ -12,30 +14,37 @@ st.session_state.setdefault("tokenized_data", {})
 st.session_state.setdefault("trained_models", {})
 st.session_state.setdefault("latent_embeddings", {})
 
+st.info(
+    "Implementation preview: these pages register datasets and record settings. "
+    "EEG preprocessing, model training, and latent-space analysis are not yet connected."
+)
+
+page_dir = Path(__file__).resolve().parent / "pages"
+
 pages = {
     "Pipeline": [
         st.Page(
-            "pages/dataset.py",
+            page_dir / "dataset.py",
             title="Dataset",
             icon=":material/folder_open:",
         ),
         st.Page(
-            "pages/preprocessing.py",
+            page_dir / "preprocessing.py",
             title="Preprocessing",
             icon=":material/tune:",
         ),
         st.Page(
-            "pages/features.py",
+            page_dir / "features.py",
             title="Features",
             icon=":material/analytics:",
         ),
         st.Page(
-            "pages/training.py",
+            page_dir / "training.py",
             title="Training",
             icon=":material/model_training:",
         ),
         st.Page(
-            "pages/interpretability.py",
+            page_dir / "interpretability.py",
             title="Interpretability",
             icon=":material/insights:",
         ),

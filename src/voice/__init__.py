@@ -3,6 +3,7 @@ from voice.preprocessing.pipeline import EEGPreprocessor
 from voice.evaluation.features import MultiBandCSPExtractor
 from voice.models.svm import CSPSVMClassifier
 from voice.pipeline import InnerSpeechPipeline
+from voice.cli import launch_app
 
 __version__ = "0.1.0"
 

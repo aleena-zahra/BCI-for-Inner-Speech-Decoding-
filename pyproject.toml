@@ -18,14 +18,14 @@ dependencies = [
     "mne>=1.0.0",
     "click>=8.0.0",
     "scikit-learn>=1.0.0",
+    "pandas",
 ]
 
 # Optional dependencies installed via: pip install voice[ui,docs]
 [project.optional-dependencies]
 ui = [
-    "streamlit>=1.35",
+    "streamlit>=1.36",
     "plotly>=5.0",
-    "pandas",
     "matplotlib",
 ]
 
