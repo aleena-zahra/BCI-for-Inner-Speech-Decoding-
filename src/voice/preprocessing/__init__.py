@@ -11,6 +11,7 @@ from voice.preprocessing.normalization import (
     remove_artifacts,
 )
 from voice.preprocessing.pipeline import preprocess_eeg_dataset, EEGPreprocessor
+from voice.preprocessing.features import EEGPatchTokenizer, SpectralFeatureExtractor
 
 __all__ = [
     "select_time_window",
@@ -20,5 +21,7 @@ __all__ = [
     "baseline_correction",
     "remove_artifacts",
     "preprocess_eeg_dataset",
-    "EEGPreprocessor"
+    "EEGPreprocessor",
+    "EEGPatchTokenizer",
+    "SpectralFeatureExtractor",
 ]

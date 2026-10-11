@@ -127,11 +127,17 @@ class EEGTrainer:
         return logits.argmax(axis=1), probabilities
 
 
-def _new_model(name: str, n_classes: int, n_channels: int, n_timepoints: int, patch_len: int, stride: int):
+def _new_model(
+    name: str, n_classes: int, n_channels: int, n_timepoints: int,
+    patch_len: int, stride: int, use_revin: bool,
+):
     if name == "EEGNet":
         from voice.models.eegnet import EEGNet
 
-        return EEGNet(n_classes=n_classes, n_channels=n_channels, n_timepoints=n_timepoints)
+        return EEGNet(
+            n_classes=n_classes, n_channels=n_channels, n_timepoints=n_timepoints,
+            use_revin=use_revin,
+        )
     if name == "EEGConformer":
         from voice.models.eegconformer import EEGConformer
 
@@ -141,6 +147,7 @@ def _new_model(name: str, n_classes: int, n_channels: int, n_timepoints: int, pa
             n_timepoints=n_timepoints,
             patch_len=patch_len,
             stride=stride,
+            use_revin=use_revin,
         )
     raise ValueError(f"Unsupported deep model: {name}")
 
@@ -166,6 +173,7 @@ def evaluate_deep_model(
     batch_size: int = 32,
     patch_len: int = 25,
     stride: int = 6,
+    use_revin: bool = False,
     test_size: float = 0.2,
     validation_size: float = 0.15,
     seed: int = 42,
@@ -220,7 +228,10 @@ def evaluate_deep_model(
         torch.manual_seed(seed + fold_number)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed + fold_number)
-        model = _new_model(model_name, len(classes), X.shape[1], X.shape[2], patch_len, stride)
+        model = _new_model(
+            model_name, len(classes), X.shape[1], X.shape[2],
+            patch_len, stride, use_revin,
+        )
         trainer = EEGTrainer(model, batch_size=batch_size, seed=seed + fold_number)
 
         def report(epoch, total_epochs, record, current_fold=fold_name):

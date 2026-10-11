@@ -6,6 +6,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from voice.models.layers import RevIN
+
 
 class Conv2dWithConstraint(nn.Conv2d):
     """Apply the EEGNet max-norm constraint before each forward pass."""
@@ -37,6 +39,7 @@ class EEGNet(nn.Module):
         F2: int = 16,
         kernel_len: int = 64,
         dropout_rate: float = 0.25,
+        use_revin: bool = False,
     ):
         super().__init__()
         if min(n_classes, n_channels, n_timepoints) < 1:
@@ -44,6 +47,7 @@ class EEGNet(nn.Module):
         self.n_classes = n_classes
         self.n_channels = n_channels
         self.n_timepoints = n_timepoints
+        self.revin = RevIN(n_channels) if use_revin else nn.Identity()
         self.conv1 = nn.Conv2d(1, F1, (1, kernel_len), padding=(0, kernel_len // 2), bias=False)
         self.bn1 = nn.BatchNorm2d(F1)
         self.depthwise = Conv2dWithConstraint(
@@ -66,6 +70,7 @@ class EEGNet(nn.Module):
 
     def _forward_features(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim == 3:
+            x = self.revin(x)
             x = x.unsqueeze(1)
         if x.ndim != 4 or x.shape[1] != 1 or x.shape[2] != self.n_channels:
             raise ValueError("EEGNet expects (batch, channels, time) EEG tensors")

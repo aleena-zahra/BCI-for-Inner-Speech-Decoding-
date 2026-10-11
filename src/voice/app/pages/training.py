@@ -70,6 +70,7 @@ if st.button("Train and evaluate", type="primary"):
                 batch_size=int(batch_size),
                 patch_len=feature_settings.get("patch_length", 25),
                 stride=feature_settings.get("stride", 6),
+                use_revin=feature_settings.get("use_revin", False),
                 progress_callback=report,
             )
             result["evaluation"] = evaluation

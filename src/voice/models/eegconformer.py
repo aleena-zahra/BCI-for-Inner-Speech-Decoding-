@@ -7,6 +7,8 @@ import math
 import torch
 from torch import nn
 
+from voice.models.layers import RevIN
+
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 1000):
@@ -60,6 +62,7 @@ class EEGConformer(nn.Module):
         patch_len: int = 25,
         stride: int = 6,
         dropout: float = 0.2,
+        use_revin: bool = False,
     ):
         super().__init__()
         if patch_len < 2 or stride < 1 or patch_len > n_timepoints:
@@ -69,6 +72,7 @@ class EEGConformer(nn.Module):
         self.n_channels = n_channels
         self.patch_len = patch_len
         self.stride = stride
+        self.revin = RevIN(n_channels) if use_revin else nn.Identity()
         self.patch_embedding = nn.Conv2d(
             1, d_model, kernel_size=(n_channels, patch_len), stride=(1, stride)
         )
@@ -88,6 +92,7 @@ class EEGConformer(nn.Module):
 
     def extract_features(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim == 3:
+            x = self.revin(x)
             x = x.unsqueeze(1)
         if x.ndim != 4 or x.shape[1] != 1 or x.shape[2] != self.n_channels:
             raise ValueError("EEGConformer expects (batch, channels, time) EEG tensors")
