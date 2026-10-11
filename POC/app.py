@@ -3,7 +3,7 @@ EEG Imagined Speech Decoding -- Proof of Concept
 Streamlit application following the 5-stage FYP methodology pipeline:
 
 1. Dataset collection (BIDS ZIP & Local Dataset Loader)
-2. EEG preprocessing (Literature 9-Step Pipeline: 0.5-100Hz, CAR, ICA, IoI Epoching, Z-Score)
+2. EEG preprocessing ( 9-Step Pipeline: 0.5-100Hz, CAR, ICA, IoI Epoching, Z-Score)
 3. Feature extraction & Patching (Temporal Patching P=25, S=6, Spectral Band Powers, Spectrograms)
 4. Deep learning decoding models (EEGNet Baseline & EEGConformer with MHSA)
 5. Cross-lingual transfer & Interpretability (UMAP/t-SNE Latent Space, Silhouette Scores, Attention Heatmaps)
@@ -52,7 +52,7 @@ st.set_page_config(
 )
 
 # ----------------------------------------------------------------------
-# Session state initialization
+# Session state 
 # ----------------------------------------------------------------------
 if "raw_data" not in st.session_state:
     st.session_state.raw_data = {}  # lang -> (raw, events, subj_array, class_names, meta_dict)
@@ -177,7 +177,7 @@ def download_openneuro_bdf(dataset_id: str, subj: str, dest_path: str):
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req) as resp, open(dest_path, "wb") as out_f:
                 total_length = resp.headers.get("content-length")
-                progress_bar = st.progress(0, text=f"Downloading real EEG data from OpenNeuro S3 ({subj})...")
+                progress_bar = st.progress(0, text=f"Downloading EEG data from OpenNeuro S3 ({subj})...")
                 downloaded = 0
                 total_bytes = int(total_length) if total_length else 150000000
                 while True:
@@ -284,21 +284,69 @@ def parse_and_load_eeg(run_info: dict):
 
     return raw, events, subj_array, cn, meta
 
+def load_multiple_runs(selected_keys, runs_dict, lang):
+    """Helper to load and concatenate multiple subjects/runs into a single session state dataset."""
+    with st.spinner(f"Loading {len(selected_keys)} recording(s) and synchronizing events..."):
+        try:
+            all_events = []
+            all_subj_arrays = []
+            raw_list = []
+            class_names = None
+            subj_map = {}
+            cumulative_samples = 0
+            
+            for key in selected_keys:
+                run_info = runs_dict[key]
+                raw, events, _, cn, _ = parse_and_load_eeg(run_info)
+                
+                if class_names is None: class_names = cn
+                
+                subj_id = run_info.get("subj", "sub-01")
+                if subj_id not in subj_map:
+                    subj_map[subj_id] = len(subj_map)
+                    
+                subj_array = np.full(len(events), subj_map[subj_id], dtype=int)
+                
+                events_adj = events.copy()
+                events_adj[:, 0] += cumulative_samples
+                all_events.append(events_adj)
+                all_subj_arrays.append(subj_array)
+                
+                cumulative_samples += raw.n_times
+                raw_list.append(raw)
+                
+            mne.concatenate_raws(raw_list)
+            final_raw = raw_list[0]
+            final_events = np.vstack(all_events)
+            final_subj_array = np.concatenate(all_subj_arrays)
+            
+            meta = {
+                "filename": f"Multi-Subject Data ({len(selected_keys)} runs)",
+                "subj_id": "Multiple",
+                "duration": final_raw.times[-1],
+                "n_channels": len(final_raw.ch_names),
+                "sfreq": final_raw.info["sfreq"]
+            }
+            
+            st.session_state.raw_data[lang] = (final_raw, final_events, final_subj_array, class_names, meta)
+            st.success(f"Successfully loaded {len(selected_keys)} recordings into {lang.title()} dataset! Length: {final_raw.times[-1]:.2f}s | Channels: {len(final_raw.ch_names)} | Total Trials: {len(final_events)}")
+        except Exception as e:
+            st.error(f"Error loading EEG recordings: {e}")
+
+
 
 # ----------------------------------------------------------------------
 # Application UI Layout
 # ----------------------------------------------------------------------
-st.title("🧠 EEG Imagined Speech Decoding -- Proof of Concept")
-st.caption(
-    "Literature-driven BCI pipeline for cross-lingual inner speech decoding (Nieto et al., 2022; Zhou et al., 2025; Lopez-Bernal, 2024)."
-)
+st.title("🧠 EEG Inner Speech Decoding -- Proof of Concept")
+
 
 STAGES = [
     "1. Dataset collection",
     "2. EEG preprocessing",
     "3. Feature extraction & Patching",
     "4. Deep learning decoding models",
-    "5. Cross-lingual transfer & Interpretability"
+    "5. Latent Space Analysis & Interpretability"
 ]
 stage = st.sidebar.radio("Pipeline Stage", STAGES)
 
@@ -307,21 +355,21 @@ stage = st.sidebar.radio("Pipeline Stage", STAGES)
 # STAGE 1 -- Dataset collection
 # ========================================================================
 if stage == "1. Dataset collection":
-    st.header("Stage 1 -- Dataset Collection & BIDS Structure Loading")
+    st.header("Stage 1 -- Dataset Collection")
     
-    tab_upload, tab_local = st.tabs(["📤 Upload Dataset ZIP", "📂 Load Pre-downloaded Real Dataset"])
+    tab_upload, tab_local = st.tabs(["📤 Upload Dataset ZIP", "📂 Load Pre-downloaded  Dataset"])
     
     # TAB 1: Upload Dataset ZIP
     with tab_upload:
-        st.subheader("Upload Real Dataset (BIDS ZIP format)")
-        st.caption("Upload a `.zip` file containing a standard BIDS EEG dataset (e.g. `ds004196_sub01_eeg.zip` or `ds004196_all_eeg.zip`).")
+        st.subheader("Upload  Dataset ( ZIP format)")
+        st.caption("Upload a `.zip` file containing a standard  EEG dataset.")
         
         up_lang = st.selectbox("Assign upload to language slot", ["english", "spanish", "chinese"], key="upload_lang_slot")
         up_zip = st.file_uploader("Upload Dataset ZIP", type=["zip"], key="upzip")
         
         if up_zip is not None:
             if st.button("Extract and Inspect Dataset Structure", key="btn_extract_zip"):
-                with st.spinner("Extracting and analyzing BIDS structure..."):
+                with st.spinner("Extracting and analyzing  structure..."):
                     temp_dir = tempfile.mkdtemp()
                     with zipfile.ZipFile(up_zip, "r") as zip_ref:
                         for member in zip_ref.namelist():
@@ -335,37 +383,34 @@ if stage == "1. Dataset collection":
             if st.session_state.detected_runs:
                 st.success(f"Detected {len(st.session_state.detected_runs)} EEG recording(s) in uploaded dataset!")
                 
-                selected_run_key = st.selectbox(
-                    "Select Subject / Recording to Load", 
+                selected_run_keys = st.multiselect(
+                    "Select Subjects / Recordings to Load", 
                     list(st.session_state.detected_runs.keys()),
+                    default=[list(st.session_state.detected_runs.keys())[0]] if st.session_state.detected_runs else None,
                     key="sel_run_upload"
                 )
-                run_info = st.session_state.detected_runs[selected_run_key]
                 
-                if run_info["is_pointer"]:
+                pointers = [k for k in selected_run_keys if st.session_state.detected_runs[k]["is_pointer"]]
+                if pointers:
                     st.warning(
-                        f"⚠️ **Git-Annex Pointer Detected:** `{run_info['filename']}` is a DataLad pointer text file (OpenNeuro GitHub archive). "
-                        "Click below to automatically retrieve the actual binary EEG recording from OpenNeuro AWS S3."
+                        f"⚠️ **Git-Annex Pointers Detected:** {len(pointers)} selected files are DataLad pointer text files. "
+                        "Click below to automatically retrieve the actual binary EEG recordings from OpenNeuro AWS S3."
                     )
-                    if st.button("🚀 Auto-Download Real EEG Data from OpenNeuro S3", key="btn_resolve_s3"):
-                        with st.spinner("Downloading real binary EEG recording..."):
-                            success = download_openneuro_bdf("ds004196", run_info["subj"], run_info["eeg_file"])
-                            if success:
-                                st.success("Downloaded real binary EEG file! Re-inspecting...")
-                                run_info["is_pointer"] = False
-                                run_info["file_size"] = os.path.getsize(run_info["eeg_file"])
-                            else:
-                                st.error("Failed to download from OpenNeuro S3.")
+                    if st.button("🚀 Auto-Download  EEG Data from OpenNeuro S3", key="btn_resolve_s3"):
+                        with st.spinner("Downloading  binary EEG recordings..."):
+                            for k in pointers:
+                                r_info = st.session_state.detected_runs[k]
+                                success = download_openneuro_bdf("ds004196", r_info["subj"], r_info["eeg_file"])
+                                if success:
+                                    st.session_state.detected_runs[k]["is_pointer"] = False
+                                    st.session_state.detected_runs[k]["file_size"] = os.path.getsize(r_info["eeg_file"])
+                            st.success("Download attempts complete! Re-inspecting...")
+                            st.rerun()
                 
-                if not run_info["is_pointer"]:
-                    if st.button("Load Recording into Pipeline", key="btn_load_run"):
-                        with st.spinner(f"Loading {run_info['filename']} and synchronizing events..."):
-                            try:
-                                raw, events, subj, cn, meta = parse_and_load_eeg(run_info)
-                                st.session_state.raw_data[up_lang] = (raw, events, subj, cn, meta)
-                                st.success(f"Successfully loaded {up_lang.title()} dataset! Length: {raw.times[-1]:.2f}s | Channels: {len(raw.ch_names)} | Trials: {len(events)}")
-                            except Exception as e:
-                                st.error(f"Error loading EEG recording: {e}")
+                valid_runs = [k for k in selected_run_keys if not st.session_state.detected_runs[k]["is_pointer"]]
+                if valid_runs:
+                    if st.button("Load Recording(s) into Pipeline", key="btn_load_run"):
+                        load_multiple_runs(valid_runs, st.session_state.detected_runs, up_lang)
 
     # TAB 2: Load Pre-downloaded Local Dataset
     with tab_local:
@@ -383,7 +428,7 @@ if stage == "1. Dataset collection":
         selected_local_ds = st.selectbox("Select local dataset folder or zip", available_datasets, key="sel_local_ds")
         local_lang = st.selectbox("Assign to language slot", ["english", "spanish", "chinese"], key="local_lang_slot")
         
-        if st.button("Scan and Load Local Dataset", key="btn_scan_local"):
+        if st.button("Scan Local Dataset", key="btn_scan_local"):
             with st.spinner("Scanning local dataset..."):
                 target_path = os.path.join(local_data_dir, selected_local_ds)
                 if selected_local_ds.endswith(".zip"):
@@ -396,13 +441,21 @@ if stage == "1. Dataset collection":
                 
                 runs = scan_bids_eeg_dataset(scan_dir)
                 if runs:
-                    st.session_state.detected_runs = runs
-                    first_key = list(runs.keys())[0]
-                    raw, events, subj, cn, meta = parse_and_load_eeg(runs[first_key])
-                    st.session_state.raw_data[local_lang] = (raw, events, subj, cn, meta)
-                    st.success(f"Successfully loaded {selected_local_ds} ({first_key}) into **{local_lang.title()}** slot!")
+                    st.session_state.detected_runs_local = runs
+                    st.success(f"Detected {len(runs)} recording(s).")
                 else:
                     st.error("No valid EEG recordings found in the selected local dataset.")
+                    
+        if "detected_runs_local" in st.session_state and st.session_state.detected_runs_local:
+            selected_local_run_keys = st.multiselect(
+                "Select Subjects / Recordings to Load", 
+                list(st.session_state.detected_runs_local.keys()),
+                default=[list(st.session_state.detected_runs_local.keys())[0]],
+                key="sel_run_local"
+            )
+            
+            if selected_local_run_keys and st.button("Load Local Recording(s) into Pipeline", key="btn_load_local"):
+                load_multiple_runs(selected_local_run_keys, st.session_state.detected_runs_local, local_lang)
 
     # Summary of Currently Loaded Datasets
     st.divider()
@@ -441,7 +494,7 @@ elif stage == "2. EEG preprocessing":
         data_tuple = st.session_state.raw_data[lang]
         raw, events, subj, cn = data_tuple[:4]
 
-        st.subheader(f"Literature-Based Preprocessing ({lang.title()} Dataset)")
+        st.subheader(f"Pre-Preprocessing ({lang.title()} Dataset)")
         st.markdown(
             "> **Standard 9-Step Preprocessing Protocol (Nieto 2022, Zhou 2025, Lopez-Bernal 2024):**\n"
             "> 1. **Scalp EEG Picking:** Discards auxiliary/stimulus channels.\n"
@@ -470,7 +523,7 @@ elif stage == "2. EEG preprocessing":
         with c5:
             ica_comp = st.slider("ICA Components", min_value=5, max_value=min(30, len(raw.ch_names) - 1), value=15)
 
-        if st.button("🚀 Run Literature Pipeline", key="btn_run_pipeline"):
+        if st.button("🚀 Run Preprocessing Pipeline", key="btn_run_pipeline"):
             pipeline = LiteraturePreprocessingPipeline(
                 target_sfreq=target_sfreq, 
                 l_freq=low, 
@@ -480,7 +533,7 @@ elif stage == "2. EEG preprocessing":
                 apply_car=apply_car
             )
             
-            with st.spinner("Executing 9-step literature pipeline: Bandpass -> Notch -> Resampling -> CAR -> ICA -> Epoching -> Z-Score Normalization..."):
+            with st.spinner("Executing 9-step  pipeline: Bandpass -> Notch -> Resampling -> CAR -> ICA -> Epoching -> Z-Score Normalization..."):
                 event_id = {str(c): c for c in set(events[:, 2])}
                 
                 try:
@@ -652,7 +705,7 @@ elif stage == "4. Deep learning decoding models":
                 train_accs.append(tr_acc)
                 val_accs.append(v_acc)
                 
-                # Real-time curve updates
+                # -time curve updates
                 df_curves = pd.DataFrame({
                     "Train Loss": train_losses,
                     "Val Loss": val_losses,
@@ -714,7 +767,7 @@ elif stage == "4. Deep learning decoding models":
 # ========================================================================
 # STAGE 5 -- Cross-lingual transfer & Interpretability
 # ========================================================================
-elif stage == "5. Cross-lingual transfer & Interpretability":
+elif stage == "5. Latent Space Analysis & Interpretability":
     st.header("Stage 5 -- Latent Space Dynamics, Clustering & Interpretability")
     if not st.session_state.trained_models:
         st.info("Please train at least one decoding model in Stage 4 first.")
