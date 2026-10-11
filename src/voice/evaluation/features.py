@@ -1,4 +1,5 @@
 import numpy as np
+import mne
 from mne.decoding import CSP
 
 class MultiBandCSPExtractor:

@@ -1,12 +1,14 @@
 import torch
-import torch.nn as nn
 from voice.models import EEGNet
 
-# Initialize model
-model = EEGNet(n_classes=2, n_channels=128, n_timepoints=256)
 
-# Create dummy trial batch: [batch_size, n_channels, n_timepoints]
-x_dummy = torch.randn(16, 128, 256)
-outputs = model(x_dummy)
+def main() -> None:
+	"""Construct EEGNet and run a forward pass on EEG-shaped input."""
+	model = EEGNet(n_classes=2, n_channels=128, n_timepoints=256)
+	signals = torch.randn(16, 128, 256)
+	outputs = model(signals)
+	print("Output shape:", outputs.shape)
 
-print("Output shape:", outputs.shape)  # torch.Size([16, 2])
+
+if __name__ == "__main__":
+	main()

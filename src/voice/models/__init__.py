@@ -1,11 +1,21 @@
 """Models subpackage for Voice BCI Inner Speech Decoding."""
 
 from voice.models.svm import CSPSVMClassifier
-from voice.models.eegnet import EEGNet
-from voice.models.eegconformer import EEGConformer
 
 __all__ = [
     "CSPSVMClassifier",
     "EEGNet",
     "EEGConformer",
 ]
+
+
+def __getattr__(name: str):
+    if name == "EEGNet":
+        from voice.models.eegnet import EEGNet
+
+        return EEGNet
+    if name == "EEGConformer":
+        from voice.models.eegconformer import EEGConformer
+
+        return EEGConformer
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
