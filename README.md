@@ -1,40 +1,74 @@
-# Voice: EEG Inner Speech Decoding
+# Voice: EEG Inner Speech Analysis
 
-Voice is a Python library for EEG trial preprocessing, feature extraction, classification, and analysis. It also includes a Streamlit dashboard for inspecting the current workflow and recording its settings.
+Voice is a Python library and Streamlit dashboard for loading event-labeled BIDS
+EEG, preprocessing trials, extracting temporal/spectral features, training
+classifiers, and inspecting held-out model representations. The dashboard is
+the interface to reusable functionality in `src/voice`; it does not implement
+a separate analysis pipeline. Cross-language transfer is outside the project
+scope.
 
-## Run the dashboard on Windows
+## Install and run
 
-From the repository root, create a virtual environment and install the library with its dashboard dependencies:
-
-```powershell
-py -3.10 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -e ".[ui]"
-```
-
-Start the dashboard:
+From the repository root:
 
 ```powershell
-voice-ui --server.address=127.0.0.1 --server.port=8501
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -e ".[ui,dev]"
+voice-ui
 ```
 
-Open <http://127.0.0.1:8501>. Stop the server by pressing `Ctrl+C` in the terminal where it is running.
+The Voice dashboard provides these library-backed pages:
 
-If the virtual environment is not activated, launch it directly:
+1. **Dataset collection** — upload a BIDS ZIP or load a local BIDS folder; inspect trials, subjects, channels, labels, and recordings.
+2. **EEG preprocessing** — configure filtering, notch frequency, resampling, epoch window, common-average reference, baseline handling, and optional amplitude rejection; compare PSD before and after.
+3. **Feature extraction and patching** — configure overlapping patches and RevIN, and inspect spectral band summaries.
+4. **Decoding models** — train CSP + SVM, EEGNet, or EEGConformer with trial holdout or leave-one-subject-out evaluation.
+5. **Latent analysis and interpretability** — view PCA/t-SNE/UMAP projections and clustering metrics, plus EEGNet channel sensitivity or Conformer attention summaries.
+
+EEGNet and EEGConformer require PyTorch. UMAP is also optional:
 
 ```powershell
-.\.venv\Scripts\voice-ui.exe --server.address=127.0.0.1 --server.port=8501
+python -m pip install -e ".[ui,dev,deep-learning]"
 ```
 
-The launcher works from other working directories too. The editable install (`-e`) makes the local `src/voice` package available to the command.
+## Data requirements
 
-## What the dashboard currently does
+The BIDS loader supports event-labeled EEG in `.bdf`, `.set`, `.fif`, or
+`.vhdr` recordings. Event labels must be present in a matching `events.tsv` or
+usable recording annotations. It will not invent labels for unlabeled data.
+The current loader also requires consistent channel names/order and sampling
+rate across runs in one dataset. CSV-only and MATLAB archives are not accepted
+by this BIDS ingestion path.
 
-The dashboard has Dataset, Preprocessing, Features, Training, and Interpretability pages. At present, the pages let you register a dataset path and record pipeline settings. They do not yet load recordings into the library, run preprocessing, train models, or calculate latent-space analyses. The interface displays this status when it opens.
+## Development checks
 
-## Library contents
+```powershell
+python -m pytest
+```
 
-The `src/voice` package contains the trial preprocessing pipeline, multiband CSP feature extraction, an SVM classifier, EEGNet and EEGConformer model definitions, evaluation utilities, and the `InnerSpeechPipeline` API. The Streamlit dashboard lives under `src/voice/app`; `voice-ui` launches its `main.py` entry point.
+The neural model tests require the optional PyTorch dependency.
 
-The separate `POC/app.py` is an experimental application with its own pipeline implementation. It is not the dashboard launched by `voice-ui`.
+## Merged POC preprocessing and interpretation
+
+In **Preprocessing**, choose **POC literature FIR** for the 0.5–100 Hz,
+250 Hz resampling, CAR, and per-channel z-score profile. Cutoffs and the
+event-relative interval remain configurable. Optional amplitude rejection is
+measured in microvolts before normalization. The before/after PSD plots show
+the actual transformed trials.
+
+ICA only removes explicitly reviewed components. Review the preview
+decomposition on the Preprocessing page, then review and save exclusions
+separately for each training fold in **Training**. Evaluation fits ICA on the
+training subset and applies that fitted decomposition to validation/test data.
+Unreviewed folds do not exclude components. The preview's component indices
+are not reused across different decompositions.
+
+**Interpretability** supports coloring held-out embeddings by word class or
+subject, class/subject silhouettes, intra/inter-class distance, EEGNet
+class-specific input-gradient sensitivity, and Conformer layer/head attention
+with event-relative patch timing. The subject silhouette is N/A for a fold
+with only one subject; these views do not prove causal or semantic decoding.
+
+See [the merged pipeline API and limitations](docs/poc_pipeline_merge.md) for
+continuous MNE Raw/events processing and library examples.

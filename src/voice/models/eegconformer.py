@@ -1,88 +1,62 @@
+"""Convolutional patch encoder with lightweight Conformer blocks."""
+
+from __future__ import annotations
+
 import math
+
 import torch
-import torch.nn as nn
+from torch import nn
+
+from voice.models.layers import RevIN
 
 
 class PositionalEncoding(nn.Module):
-    """Adds sinusoidal positional encoding to sequence embeddings."""
-
     def __init__(self, d_model: int, max_len: int = 1000):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0))  # Shape: (1, max_len, d_model)
+        position = torch.arange(max_len, dtype=torch.float32).unsqueeze(1)
+        scale = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        encoding = torch.zeros(max_len, d_model)
+        encoding[:, 0::2] = torch.sin(position * scale)
+        encoding[:, 1::2] = torch.cos(position * scale[: encoding[:, 1::2].shape[1]])
+        self.register_buffer("encoding", encoding.unsqueeze(0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (Batch, Seq_len, d_model)
-        seq_len = x.size(1)
-        return x + self.pe[:, :seq_len, :]
+        if x.shape[1] > self.encoding.shape[1]:
+            raise ValueError("Input contains more temporal patches than positional encoding supports")
+        return x + self.encoding[:, : x.shape[1]]
 
 
 class ConformerEncoderBlock(nn.Module):
-    """Single Conformer block with Multi-Head Self-Attention and Conv Feed-Forward."""
-
-    def __init__(
-        self,
-        d_model: int = 64,
-        n_heads: int = 4,
-        ffn_dim: int = 128,
-        dropout: float = 0.2,
-    ):
+    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.2):
         super().__init__()
         self.norm1 = nn.LayerNorm(d_model)
-        self.attn = nn.MultiheadAttention(
-            embed_dim=d_model, num_heads=n_heads, dropout=dropout, batch_first=True
-        )
-
+        self.attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        self.drop1 = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(d_model)
         self.ffn = nn.Sequential(
-            nn.Linear(d_model, ffn_dim),
+            nn.Linear(d_model, d_model * 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(ffn_dim, d_model),
+            nn.Linear(d_model * 2, d_model),
             nn.Dropout(dropout),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Multi-Head Attention Branch
-        res = x
-        x_norm = self.norm1(x)
-        attn_out, _ = self.attn(x_norm, x_norm, x_norm)
-        x = res + attn_out
-
-        # Feed-Forward Branch
+    def forward(self, x: torch.Tensor, return_attention: bool = False):
+        normalized = self.norm1(x)
+        attended, weights = self.attn(
+            normalized,
+            normalized,
+            normalized,
+            need_weights=return_attention,
+            average_attn_weights=False,
+        )
+        x = x + self.drop1(attended)
         x = x + self.ffn(self.norm2(x))
-        return x
+        return (x, weights) if return_attention else x
 
 
 class EEGConformer(nn.Module):
-    """EEG-Conformer architecture for EEG classification.
-
-    Combines CNN-based spatial-temporal feature extraction with
-    Transformer-based sequence modeling.
-
-    Parameters
-    ----------
-    n_classes : int, default=2
-        Number of output classification classes.
-    n_channels : int, default=128
-        Number of input EEG channels.
-    n_timepoints : int, default=256
-        Number of time points per trial.
-    d_model : int, default=64
-        Embedding dimension for the Conformer sequence blocks.
-    n_heads : int, default=4
-        Number of heads in Multi-Head Self-Attention.
-    n_layers : int, default=2
-        Number of stacked Conformer encoder blocks.
-    dropout : float, default=0.2
-        Dropout rate applied across layers.
-    """
+    """EEG classifier whose convolution projects each temporal patch to a token."""
 
     def __init__(
         self,
@@ -92,57 +66,59 @@ class EEGConformer(nn.Module):
         d_model: int = 64,
         n_heads: int = 4,
         n_layers: int = 2,
+        patch_len: int = 25,
+        stride: int = 6,
         dropout: float = 0.2,
+        use_revin: bool = False,
     ):
         super().__init__()
-
-        # Temporal & Spatial Convolutional Feature Extractor
-        self.conv_spatial = nn.Sequential(
-            nn.Conv2d(1, 16, (1, 15), padding=(0, 7), bias=False),
-            nn.BatchNorm2d(16),
-            nn.ELU(),
-            nn.Conv2d(16, d_model, (n_channels, 1), bias=False),
-            nn.BatchNorm2d(d_model),
-            nn.ELU(),
-            nn.AvgPool2d((1, 4)),
-            nn.Dropout(dropout),
+        if patch_len < 2 or stride < 1 or patch_len > n_timepoints:
+            raise ValueError("Patch length and stride must fit the input time dimension")
+        if d_model % n_heads:
+            raise ValueError("d_model must be divisible by n_heads")
+        self.n_channels = n_channels
+        self.patch_len = patch_len
+        self.stride = stride
+        self.revin = RevIN(n_channels) if use_revin else nn.Identity()
+        self.patch_embedding = nn.Conv2d(
+            1, d_model, kernel_size=(n_channels, patch_len), stride=(1, stride)
         )
-
-        # Positional Encoding & Conformer Sequence Blocks
-        self.pos_encoder = PositionalEncoding(d_model=d_model)
-        self.conformer_blocks = nn.ModuleList(
-            [
-                ConformerEncoderBlock(
-                    d_model=d_model,
-                    n_heads=n_heads,
-                    ffn_dim=d_model * 2,
-                    dropout=dropout,
-                )
-                for _ in range(n_layers)
-            ]
+        n_patches = (n_timepoints - patch_len) // stride + 1
+        self.pos_encoder = PositionalEncoding(d_model, max_len=max(1000, n_patches))
+        self.embed_dropout = nn.Dropout(dropout)
+        self.blocks = nn.ModuleList(
+            [ConformerEncoderBlock(d_model, n_heads, dropout) for _ in range(n_layers)]
         )
-
-        # Dense Classifier Head
+        self.norm = nn.LayerNorm(d_model)
         self.classifier = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, n_classes),
+            nn.Linear(d_model, d_model // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model // 2, n_classes),
         )
+
+    def extract_features(self, x: torch.Tensor, return_attention: bool = False):
+        if x.ndim == 3:
+            x = self.revin(x)
+            x = x.unsqueeze(1)
+        if x.ndim != 4 or x.shape[1] != 1 or x.shape[2] != self.n_channels:
+            raise ValueError("EEGConformer expects (batch, channels, time) EEG tensors")
+        tokens = self.patch_embedding(x).squeeze(2).transpose(1, 2)
+        tokens = self.embed_dropout(self.pos_encoder(tokens))
+        attention_maps = []
+        for block in self.blocks:
+            if return_attention:
+                tokens, weights = block(tokens, return_attention=True)
+                attention_maps.append(weights)
+            else:
+                tokens = block(tokens)
+        latent = self.norm(tokens).mean(dim=1)
+        return (latent, attention_maps) if return_attention else latent
+
+    def attention_maps(self, x: torch.Tensor) -> list[torch.Tensor]:
+        """Return per-layer, per-head self-attention matrices for an EEG batch."""
+        _, maps = self.extract_features(x, return_attention=True)
+        return maps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Input shape: (Batch, Channels, Time) or (Batch, 1, Channels, Time)
-        if x.ndim == 3:
-            x = x.unsqueeze(1)
-
-        # CNN Feature Extraction -> (Batch, d_model, 1, Time_subsampled)
-        x = self.conv_spatial(x)
-        x = x.squeeze(2).transpose(1, 2)  # Reshape to (Batch, Sequence_length, d_model)
-
-        # Conformer Sequence Modeling
-        x = self.pos_encoder(x)
-        for block in self.conformer_blocks:
-            x = block(x)
-
-        # Global Average Pooling along sequence time dimension
-        latent = x.mean(dim=1)
-        logits = self.classifier(latent)
-        return logits
+        return self.classifier(self.extract_features(x))

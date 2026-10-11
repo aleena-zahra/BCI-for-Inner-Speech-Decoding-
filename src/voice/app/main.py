@@ -14,11 +14,6 @@ st.session_state.setdefault("tokenized_data", {})
 st.session_state.setdefault("trained_models", {})
 st.session_state.setdefault("latent_embeddings", {})
 
-st.info(
-    "Implementation preview: these pages register datasets and record settings. "
-    "EEG preprocessing, model training, and latent-space analysis are not yet connected."
-)
-
 page_dir = Path(__file__).resolve().parent / "pages"
 
 pages = {
