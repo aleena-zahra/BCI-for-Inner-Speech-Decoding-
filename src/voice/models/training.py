@@ -215,7 +215,7 @@ def evaluate_deep_model(
     else:
         raise ValueError("strategy must be 'trial' or 'loso'")
 
-    models, histories, fold_latents = {}, {}, {}
+    models, histories, fold_latents, fold_test_signals, fold_true_labels = {}, {}, {}, {}, {}
     true_parts, pred_parts, subject_parts = [], [], []
     for fold_number, (fold_name, trainval, test) in enumerate(folds):
         train, validation = train_test_split(
@@ -244,6 +244,8 @@ def evaluate_deep_model(
         )
         predictions, probabilities = trainer.predict(X[test])
         fold_latents[fold_name] = extract_model_embeddings(model, X[test], device=str(trainer.device))
+        fold_test_signals[fold_name] = np.asarray(X[test], dtype=np.float32)
+        fold_true_labels[fold_name] = classes[encoded[test]]
         models[fold_name] = model.to("cpu")
         histories[fold_name] = trainer.history
         true_parts.append(encoded[test])
@@ -265,6 +267,8 @@ def evaluate_deep_model(
         "subjects": combined_subjects,
         "per_subject_accuracy": per_subject,
         "fold_latents": fold_latents,
+        "fold_test_signals": fold_test_signals,
+        "fold_true_labels": fold_true_labels,
         "models": models,
         "histories": histories,
         "strategy": strategy,
@@ -272,6 +276,7 @@ def evaluate_deep_model(
     })
     if strategy == "trial":
         results["features"] = fold_latents["trial holdout"]
+        results["test_signals"] = fold_test_signals["trial holdout"]
         results["model"] = models["trial holdout"]
         results["history"] = histories["trial holdout"]
     return results

@@ -6,6 +6,7 @@ torch = pytest.importorskip("torch")
 from voice.models.eegconformer import EEGConformer
 from voice.models.eegnet import EEGNet
 from voice.models.training import evaluate_deep_model
+from voice.evaluation.interpretability import conformer_attention_summary, eegnet_channel_saliency
 
 
 @pytest.mark.parametrize("architecture", ["EEGNet", "EEGConformer"])
@@ -39,3 +40,8 @@ def test_conformer_patch_shape_and_eegnet_forward():
     )
     assert eegnet(signals).shape == (2, 3)
     assert conformer(signals).shape == (2, 3)
+    attention = conformer.attention_maps(signals)
+    assert attention[0].shape == (2, 4, 15, 15)
+    importance = eegnet_channel_saliency(eegnet, signals)
+    assert importance.shape == (8,)
+    assert np.isclose(importance.sum(), 1.0)

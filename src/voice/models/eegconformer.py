@@ -41,11 +41,18 @@ class ConformerEncoderBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_attention: bool = False):
         normalized = self.norm1(x)
-        attended, _ = self.attn(normalized, normalized, normalized, need_weights=False)
+        attended, weights = self.attn(
+            normalized,
+            normalized,
+            normalized,
+            need_weights=return_attention,
+            average_attn_weights=False,
+        )
         x = x + self.drop1(attended)
-        return x + self.ffn(self.norm2(x))
+        x = x + self.ffn(self.norm2(x))
+        return (x, weights) if return_attention else x
 
 
 class EEGConformer(nn.Module):
@@ -90,7 +97,7 @@ class EEGConformer(nn.Module):
             nn.Linear(d_model // 2, n_classes),
         )
 
-    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+    def extract_features(self, x: torch.Tensor, return_attention: bool = False):
         if x.ndim == 3:
             x = self.revin(x)
             x = x.unsqueeze(1)
@@ -98,9 +105,20 @@ class EEGConformer(nn.Module):
             raise ValueError("EEGConformer expects (batch, channels, time) EEG tensors")
         tokens = self.patch_embedding(x).squeeze(2).transpose(1, 2)
         tokens = self.embed_dropout(self.pos_encoder(tokens))
+        attention_maps = []
         for block in self.blocks:
-            tokens = block(tokens)
-        return self.norm(tokens).mean(dim=1)
+            if return_attention:
+                tokens, weights = block(tokens, return_attention=True)
+                attention_maps.append(weights)
+            else:
+                tokens = block(tokens)
+        latent = self.norm(tokens).mean(dim=1)
+        return (latent, attention_maps) if return_attention else latent
+
+    def attention_maps(self, x: torch.Tensor) -> list[torch.Tensor]:
+        """Return per-layer, per-head self-attention matrices for an EEG batch."""
+        _, maps = self.extract_features(x, return_attention=True)
+        return maps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.classifier(self.extract_features(x))
