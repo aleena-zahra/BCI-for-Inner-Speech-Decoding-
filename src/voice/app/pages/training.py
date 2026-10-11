@@ -46,6 +46,17 @@ if st.button("Train and evaluate", type="primary"):
             st.session_state.trained_models["active"] = {
                 "kind": "CSP + SVM", "pipeline": pipeline, "result": result,
             }
+            # Keep a separately fitted source model for the optional target
+            # dataset experiment; held-out metrics above remain fold-isolated.
+            source_pipeline = InnerSpeechPipeline(
+                preprocessor=EEGPreprocessor(**settings),
+                feature_extractor=MultiBandCSPExtractor(
+                    n_components=feature_settings["n_components"],
+                    sfreq=settings["target_sfreq"],
+                ),
+            )
+            source_pipeline.fit(source.signals, source.labels)
+            st.session_state.trained_models["active"]["source_pipeline"] = source_pipeline
         else:
             from voice.models.training import evaluate_deep_model
 

@@ -11,6 +11,7 @@ st.session_state.setdefault("proc_data", {})
 st.session_state.setdefault("tokenized_data", {})
 st.session_state.setdefault("trained_models", {})
 st.session_state.setdefault("latent_embeddings", {})
+st.session_state.setdefault("transfer_data", None)
 
 pages = {
     "Pipeline": [
@@ -38,6 +39,11 @@ pages = {
             "pages/interpretability.py",
             title="Interpretability",
             icon=":material/insights:",
+        ),
+        st.Page(
+            "pages/transfer.py",
+            title="Cross-language transfer",
+            icon=":material/compare_arrows:",
         ),
     ]
 }
